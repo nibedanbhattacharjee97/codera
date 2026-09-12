@@ -168,7 +168,7 @@ def require_login(role="admin"):
                     background: rgba(255, 255, 255, 0.95);
                     backdrop-filter: blur(12px);
                     border-radius: 20px;
-                    padding: 2.5rem 2rem;
+                    padding: 2.2rem 2rem;
                     box-shadow: 0 15px 35px rgba(0,0,0,0.25);
                     border: 1px solid rgba(255, 255, 255, 0.9);
                     margin-top: 6vh;
@@ -191,10 +191,9 @@ def require_login(role="admin"):
             st.markdown('<div class="clean-login-card">', unsafe_allow_html=True)
             
             with st.form("login_form", clear_on_submit=False):
-                st.markdown(f"<h3 style='color:{PALETTE['navy']}; font-size:1.35rem; font-weight:700; margin-bottom:1.2rem; text-align:center;'>{role.capitalize()} Portal Login</h3>", unsafe_allow_html=True)
                 username = st.text_input("Username", placeholder="Enter username")
                 password = st.text_input("Password", type="password", placeholder="••••••••")
-                st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+                st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
                 submitted = st.form_submit_button("Sign In to Portal", use_container_width=True)
                 
                 if submitted:
