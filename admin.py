@@ -28,11 +28,27 @@ require_login(role="admin")
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# ---------------------------------------------------------------------------
+# Sidebar Setup & Explicit Sign Out Option
+# ---------------------------------------------------------------------------
 render_sidebar_brand()
 with st.sidebar:
     st.markdown(f"**Signed in as** \n{st.session_state.get('username')}")
     st.markdown('<span class="hr-pill pill-active">ADMIN</span>', unsafe_allow_html=True)
-logout_button()
+    st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+    
+    # Direct Logout Option in Sidebar
+    if st.button("🚪 Sign Out", use_container_width=True):
+        # Clear query parameters / session state cleanly to redirect back to login
+        try:
+            if hasattr(st, "query_params"):
+                st.query_params.clear()
+            else:
+                st.experimental_set_query_params()
+        except Exception:
+            pass
+        st.session_state.clear()
+        st.rerun()
 
 st.title("Admin Dashboard")
 st.caption("Manage employee records, payroll data, documents, leave and portal access.")
@@ -309,14 +325,3 @@ with tab_announce:
             add_announcement(title.strip(), message.strip())
             st.success("Announcement published successfully to employee portal feeds.")
             st.rerun()
-
-render_sidebar_brand()
-with st.sidebar:
-    st.markdown(f"**Signed in as** \n{st.session_state.get('username')}")
-    st.markdown('<span class="hr-pill pill-active">ADMIN</span>', unsafe_allow_html=True)
-    st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
-    
-    # Direct Logout Option in Sidebar
-    if st.button("🚪 Sign Out", use_container_width=True):
-        st.session_state.clear()
-        st.rerun()
