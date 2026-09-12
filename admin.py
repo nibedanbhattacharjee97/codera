@@ -14,7 +14,7 @@ from database import (
     get_all_employees, employee_count, next_employee_code, calculate_ctc,
     create_user, username_exists, get_leave_requests, decide_leave,
     get_all_employee_names, add_announcement, get_announcements,
-    get_statutory_summary, get_user_by_employee_code, reset_employee_password,
+    get_statutory_summary, get_user_by_employee_code, reset_employee_password, get_database_info,
 )
 from utils import (
     inject_css, render_sidebar_brand, require_login,
@@ -55,6 +55,8 @@ col_title, col_logout = st.columns([4, 1])
 with col_title:
     st.title("Admin Dashboard")
     st.caption("Manage employee records, payroll data, documents, leave and portal access.")
+    dbi = get_database_info()
+    st.caption(f"Shared database: {dbi['path']} · Employees: {dbi['employee_count']} · Portal users: {dbi['employee_login_count']}")
 
 with col_logout:
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
@@ -403,16 +405,16 @@ with tab_access:
                 do_reset = st.form_submit_button("Reset Password", use_container_width=True)
                 if do_reset:
                     pwd = reset_password.strip()
-                    if len(pwd) < 8:
-                        st.error("Password should be at least 8 characters.")
+                    if len(pwd) < 4:
+                        st.error("Password should be at least 4 characters.")
                     else:
                         uname = reset_employee_password(sel_emp_code, pwd)
                         if uname:
                             st.session_state["last_generated_creds"] = {"username": uname, "password": pwd}
-                            st.success(f"Portal password is ready for {uname}. Use the credentials shown below.")
+                            st.success(f"Portal login repaired/reset successfully for {sel_emp_code}.")
                             st.rerun()
                         else:
-                            st.error("Could not create/reset the portal login. Check that the employee record exists and that the username is not used by another account.")
+                            st.error("Could not reset the portal login. Verify that this employee exists and that the username is not used by another account.")
         else:
             with st.form("access_form"):
                 new_username = st.text_input("Username", value=sel_emp_code)

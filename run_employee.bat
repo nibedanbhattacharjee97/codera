@@ -1,4 +1,4 @@
 @echo off
-python -m pip install -r requirements.txt
-streamlit run employee_count.py
+cd /d "%~dp0"
+python -m streamlit run employee_count.py
 pause

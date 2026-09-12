@@ -1,0 +1,22 @@
+IMPORTANT FIRST RUN
+===================
+Admin and Employee must point to the SAME database.
+
+The app default is:
+%USERPROFILE%\.tec_taniva_hrms\hr_system.db
+
+If you already have a working hr_system.db containing your employees, copy it into the shared location before first run:
+
+python setup_shared_db.py --source "C:\path\to\your\database\hr_system.db"
+
+If the shared database already exists, make a backup before using --force.
+
+Then run:
+run_admin.bat
+run_employee.bat
+
+Default admin on a brand-new database:
+admin / admin123
+
+For employee TT-EMP-0001, after the employee record exists:
+python diagnose_login.py --employee TT-EMP-0001 --reset-password Welcome@123
