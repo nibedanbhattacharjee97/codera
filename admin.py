@@ -149,7 +149,6 @@ with tab_add:
             value=bool(emp.get("is_pwd", 0)),
         )
 
-        # Live statutory calculation (recomputes on every widget interaction)
         live_ctc, bd = calculate_ctc(basic_pay, da, hra, phonebill_pay, others, esic_if_applicable, pf_basis, is_pwd)
 
         st.markdown("###### Suggested statutory deductions (editable below)")
@@ -192,11 +191,6 @@ with tab_add:
             </div>
             """,
             unsafe_allow_html=True,
-        )
-        st.caption(
-            "Note: EPFO admin charges are shown per-employee for CTC estimation. In actual EPFO remittance "
-            "these are reconciled at the establishment level with a ₹500/month minimum (₹75 if there are no "
-            "contributing members that month) — see the Statutory Summary tab for the company-wide total."
         )
 
         st.markdown("---")
@@ -330,11 +324,6 @@ with tab_directory:
 
 with tab_statutory:
     st.subheader("Company-Wide Statutory Contribution Summary")
-    st.caption(
-        "Aggregate employer-side PF & ESI outgo across all Active employees, for payroll planning and "
-        "cross-checking against EPFO/ESIC challans. Figures are estimates built from each employee's "
-        "individual record."
-    )
     summary = get_statutory_summary()
     if not summary or not summary.get("employee_count"):
         st.info("No active employees yet — statutory totals will appear here once employees are onboarded.")
@@ -350,13 +339,6 @@ with tab_statutory:
         with h1: metric_card("Total Employer PF Outgo", f"₹ {summary['total_employer_pf']:,.0f}")
         with h2: metric_card("Total Employer ESIC", f"₹ {summary['total_employer_esic']:,.0f}")
         with h3: metric_card("Total Employee PF + ESIC (deductions)", f"₹ {summary['total_employee_pf'] + summary['total_employee_esic']:,.0f}")
-
-        st.info(
-            f"Across **{summary['employee_count']}** active employees. Remember: EPFO admin charges have a "
-            "real-world establishment-level minimum of ₹500/month (₹75 if no contributing members that "
-            "month) — if your per-employee sum above is lower than that floor, your actual EPFO remittance "
-            "for admin charges will be the ₹500 minimum, not the summed estimate."
-        )
 
 with tab_leaves:
     st.subheader("Employee Leave Requests")

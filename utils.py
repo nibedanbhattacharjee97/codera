@@ -13,15 +13,10 @@ from database import authenticate_user
 
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 
-# In production, set this via an environment variable instead of hardcoding it,
-# e.g.  export HRMS_SESSION_SECRET="a-long-random-string"
 SESSION_SECRET = os.environ.get("HRMS_SESSION_SECRET", "TEC_TANIVA_HRMS_PERSISTENT_KEY_2026")
 
-# ---------------------------------------------------------------------------
-# Session Persistence Helpers (Preserves Login Across Browser Refresh)
-# ---------------------------------------------------------------------------
+
 def _sign(payload: str) -> str:
-    """HMAC-SHA256 signature, constant-time-comparable, keyed with SESSION_SECRET."""
     return hmac.new(SESSION_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
 
 
@@ -82,9 +77,6 @@ def _clear_query_params():
         pass
 
 
-# ---------------------------------------------------------------------------
-# UI Assets & Styling
-# ---------------------------------------------------------------------------
 def get_base64_image(image_path):
     if os.path.exists(image_path):
         with open(image_path, "rb") as f:
@@ -126,7 +118,6 @@ def inject_css():
 
         #MainMenu, header, footer {{ visibility: hidden; }}
 
-        /* ---------- Sidebar High Contrast Styling ---------- */
         section[data-testid="stSidebar"] {{
             background: linear-gradient(180deg, {PALETTE['navy']} 0%, {PALETTE['secondary_navy']} 100%);
             border-right: 1px solid rgba(255,255,255,0.08);
@@ -135,7 +126,6 @@ def inject_css():
             color: #ffffff !important;
         }}
 
-        /* Force Sidebar Buttons to be Highly Visible */
         section[data-testid="stSidebar"] .stButton > button {{
             background-color: rgba(23, 182, 167, 0.15) !important;
             border: 1px solid {PALETTE['teal']} !important;
@@ -152,7 +142,6 @@ def inject_css():
             box-shadow: 0 4px 12px rgba(23, 182, 167, 0.3);
         }}
 
-        /* Modern Enterprise Cards */
         .hr-card {{
             background: {PALETTE['card']};
             border-radius: 16px;
@@ -162,7 +151,6 @@ def inject_css():
             margin-bottom: 1.2rem;
         }}
 
-        /* Metric Cards */
         .hr-metric {{
             background: linear-gradient(135deg, {PALETTE['navy']}, {PALETTE['secondary_navy']});
             color: white;
@@ -186,7 +174,6 @@ def inject_css():
             margin-top: 0.3rem;
         }}
 
-        /* Badges & Pills */
         .hr-pill {{
             display: inline-block;
             padding: 0.3rem 0.9rem;
@@ -200,7 +187,6 @@ def inject_css():
         .pill-pending {{ background: #fef9c3; color: #854d0e !important; }}
         .pill-rejected {{ background: #fee2e2; color: #991b1b !important; }}
 
-        /* ---------- Date Picker & Calendar Popup Visibility Fix ---------- */
         div[data-baseweb="popover"], div[data-baseweb="calendar"] {{
             background-color: #ffffff !important;
             color: #0f172a !important;
@@ -215,8 +201,6 @@ def inject_css():
             background-color: #f1f5f9 !important;
             color: #0f172a !important;
         }}
-        /* Today's date (unselected) - subtle outline instead of a hard filled pill,
-           so it doesn't get confused with the actually selected day */
         div[data-baseweb="calendar"] [aria-label*="Today"]:not([aria-selected="true"]) {{
             border: 1.5px solid {PALETTE['teal']} !important;
             border-radius: 8px !important;
@@ -224,7 +208,6 @@ def inject_css():
             color: {PALETTE['teal_dark']} !important;
             -webkit-text-fill-color: {PALETTE['teal_dark']} !important;
         }}
-        /* Actually selected date - solid teal fill */
         div[data-baseweb="calendar"] [aria-selected="true"] {{
             background-color: {PALETTE['teal']} !important;
             color: #ffffff !important;

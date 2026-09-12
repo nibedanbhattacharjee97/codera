@@ -23,10 +23,15 @@ inject_css()
 require_login(role="employee")
 
 emp_code = st.session_state.get("employee_code")
+
+if not emp_code:
+    st.error("Session employee code missing. Please sign out and log back in.")
+    st.stop()
+
 emp = get_employee(emp_code)
 
 if not emp:
-    st.error("Employee profile record not found. Please contact HR.")
+    st.error(f"Employee profile record not found for code: {emp_code}. Please contact HR.")
     st.stop()
 
 render_sidebar_brand()
@@ -56,9 +61,6 @@ tab_profile, tab_payslip, tab_leave, tab_docs, tab_news, tab_settings = st.tabs(
     ["🧾 My Profile", "💰 Salary Structure", "🗓️ Leave Application", "📁 My Documents", "📢 Announcements", "⚙️ Settings"]
 )
 
-# ---------------------------------------------------------------------------
-# TAB 1 — Profile
-# ---------------------------------------------------------------------------
 with tab_profile:
     st.markdown('<div class="hr-card">', unsafe_allow_html=True)
     p1, p2 = st.columns([1, 2])
@@ -86,9 +88,6 @@ with tab_profile:
         st.write(f"**UAN:** {emp.get('uan_number') or '—'} &nbsp;·&nbsp; **ESIC No.:** {emp.get('esic_number') or '—'}")
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------------
-# TAB 2 — Salary Structure
-# ---------------------------------------------------------------------------
 with tab_payslip:
     st.subheader("Salary & Compensation Summary")
     st.markdown('<div class="hr-card">', unsafe_allow_html=True)
@@ -130,16 +129,8 @@ with tab_payslip:
         """,
         unsafe_allow_html=True,
     )
-    st.caption(
-        "CTC = Basic + DA + HRA + Phone Bill + Others + Employer PF (EPF + EPS, capped ₹1,250 + EDLI, "
-        "capped ₹75 + Admin Charges 0.5%, all on the PF Wage per your contribution basis) + Employer ESIC "
-        "(3.25% of gross, only if gross is within the ESIC wage ceiling and ESIC is marked applicable)."
-    )
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------------
-# TAB 3 — Leave
-# ---------------------------------------------------------------------------
 with tab_leave:
     st.subheader("Apply for Leave")
     st.markdown('<div class="hr-card">', unsafe_allow_html=True)
@@ -177,9 +168,6 @@ with tab_leave:
                 unsafe_allow_html=True,
             )
 
-# ---------------------------------------------------------------------------
-# TAB 4 — Documents
-# ---------------------------------------------------------------------------
 with tab_docs:
     st.subheader("My Uploaded Documents")
     doc_fields = [
@@ -203,9 +191,6 @@ with tab_docs:
             st.markdown("</div>", unsafe_allow_html=True)
         i += 1
 
-# ---------------------------------------------------------------------------
-# TAB 5 — Announcements
-# ---------------------------------------------------------------------------
 with tab_news:
     st.subheader("Company Announcements")
     anns = get_announcements(10)
@@ -219,9 +204,6 @@ with tab_news:
             unsafe_allow_html=True,
         )
 
-# ---------------------------------------------------------------------------
-# TAB 6 — Settings
-# ---------------------------------------------------------------------------
 with tab_settings:
     st.subheader("Account Settings")
     with st.form("pw_form"):
