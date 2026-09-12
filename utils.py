@@ -268,33 +268,52 @@ def require_login(role="admin"):
                 background-image: linear-gradient(rgba(11, 28, 44, 0.25), rgba(11, 28, 44, 0.25)), url("data:image/png;base64,{bg_b64}");
                 background-size: cover; background-position: center; background-repeat: no-repeat; background-attachment: fixed;
             }}
-            /* Transparent / Glassmorphism Login Box */
+            
+            /* Modern Uniform Glassmorphism Login Box Styles */
             [data-testid="stForm"] {{
-                background: rgba(255, 255, 255, 0.2) !important; 
-                backdrop-filter: blur(16px) !important;
-                -webkit-backdrop-filter: blur(16px) !important;
+                background: rgba(255, 255, 255, 0.18) !important; 
+                backdrop-filter: blur(18px) !important;
+                -webkit-backdrop-filter: blur(18px) !important;
                 border-radius: 20px !important; 
-                padding: 2rem !important; 
-                box-shadow: 0 15px 35px rgba(0, 0, 0, 0.3) !important;
-                border: 1px solid rgba(255, 255, 255, 0.4) !important;
+                padding: 1.8rem 2rem !important; 
+                box-shadow: 0 15px 35px rgba(0, 0, 0, 0.25) !important;
+                border: 1px solid rgba(255, 255, 255, 0.35) !important;
+                max-width: 420px !important;
+                margin: 0 auto !important;
             }}
-            /* Ensure text labels inside the transparent form stay crisp and readable */
+
+            /* Field label adjustments inside form */
             [data-testid="stForm"] label div p {{
                 color: #0f172a !important;
                 font-weight: 600 !important;
+                font-size: 0.85rem !important;
             }}
             </style>
             """, unsafe_allow_html=True)
 
-    st.markdown("<div style='height: 8vh;'></div>", unsafe_allow_html=True)
-    _, col = st.columns([1.0, 1.25])
+    st.markdown("<div style='height: 10vh;'></div>", unsafe_allow_html=True)
+    
+    # Balanced centering layout so both Admin and Employee login panels are the exact same compact width and aligned
+    _, col, _ = st.columns([1.2, 1.1, 1.2])
     with col:
-        st.markdown(f"## {'Admin' if role == 'admin' else ''} ")
-        st.caption("")
+        portal_title = "Admin Portal" if role == "admin" else "Employee Portal"
+        st.markdown(
+            f"""
+            <div style="text-align: center; margin-bottom: 1rem;">
+                <h3 style="color: #ffffff; font-weight: 700; text-shadow: 0 2px 4px rgba(0,0.5,0.5,0.4); margin-bottom: 0.2rem;">{portal_title}</h3>
+                <p style="color: #cbd5e1; font-size: 0.8rem; font-weight: 500;">Please sign in to continue</p>
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
+        
         with st.form(f"login_form_{role}", clear_on_submit=False):
             username = st.text_input("Username", placeholder="e.g. TT-EMP-0001", autocomplete="username")
             password = st.text_input("Password", type="password", placeholder="Enter password", autocomplete="current-password")
+            
+            st.markdown("<div style='height: 5px;'></div>", unsafe_allow_html=True)
             submitted = st.form_submit_button("Sign In", use_container_width=True, type="primary")
+            
             if submitted:
                 user = authenticate_user(username, password)
                 if user and user.get("role") == role:
