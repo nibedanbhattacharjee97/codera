@@ -16,7 +16,7 @@ from database import (
     get_all_employee_names, add_announcement, get_announcements,
 )
 from utils import (
-    inject_css, render_sidebar_brand, require_login, logout_button,
+    inject_css, render_sidebar_brand, require_login,
     metric_card, status_pill, PALETTE,
 )
 
@@ -29,17 +29,17 @@ UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
-# Sidebar Setup & Explicit Sign Out Option
+# Unified Sidebar Branding & Sign Out Control
 # ---------------------------------------------------------------------------
 render_sidebar_brand()
+
 with st.sidebar:
     st.markdown(f"**Signed in as** \n{st.session_state.get('username')}")
     st.markdown('<span class="hr-pill pill-active">ADMIN</span>', unsafe_allow_html=True)
     st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
     
-    # Direct Logout Option in Sidebar
+    # Fully integrated, prominent Sign Out button
     if st.button("🚪 Sign Out", use_container_width=True):
-        # Clear query parameters / session state cleanly to redirect back to login
         try:
             if hasattr(st, "query_params"):
                 st.query_params.clear()
