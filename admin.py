@@ -229,24 +229,22 @@ with tab_add:
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# TAB 2 — Employee Directory
+# TAB 2 — Employee Directory (Full Master Data View + Filtered Export)
 # ---------------------------------------------------------------------------
 with tab_directory:
     st.subheader("Employee Master Directory")
     if not employees:
         st.info("No employees onboarded yet. Add an employee using the 'Onboard Employee' tab.")
     else:
-        search = st.text_input("🔍 Search employees by name, code, designation, or mobile")
+        search = st.text_input("🔍 Search employees by name, code, designation, mobile, email, place, etc.")
         df = pd.DataFrame(employees)
-        show_cols = ["employee_code", "employee_name", "designation", "employee_type", "mobile_number", "email", "ctc", "status"]
-        show_cols = [c for c in show_cols if c in df.columns]
-        view = df[show_cols].rename(columns={
-            "employee_code": "Code", "employee_name": "Name", "designation": "Designation",
-            "employee_type": "Type", "mobile_number": "Mobile", "email": "Email", "ctc": "CTC (₹)", "status": "Status"
-        })
+        
+        # Display all available onboarding columns in the directory table view
+        view = df.copy()
         if search:
             mask = view.apply(lambda r: search.lower() in " ".join(str(v).lower() for v in r), axis=1)
             view = view[mask]
+
         st.dataframe(view, use_container_width=True, hide_index=True)
 
         st.markdown("---")
@@ -267,8 +265,15 @@ with tab_directory:
                 st.success("Employee record deleted.")
                 st.rerun()
 
-        csv = df[show_cols].to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Export Master Directory CSV", csv, "employee_directory.csv", "text/csv")
+        # Export CSV button containing filtered view rows with all master fields
+        csv_data = view.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇️ Export Filtered Master Directory to Excel / CSV", 
+            csv_data, 
+            "employee_master_directory.csv", 
+            "text/csv",
+            use_container_width=True
+        )
 
 # ---------------------------------------------------------------------------
 # TAB 3 — Leave Approvals
