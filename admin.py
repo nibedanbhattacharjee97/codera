@@ -28,8 +28,20 @@ require_login(role="admin")
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# Helper function to perform clean logout & reset query params/session state
+def perform_logout():
+    try:
+        if hasattr(st, "query_params"):
+            st.query_params.clear()
+        else:
+            st.experimental_set_query_params()
+    except Exception:
+        pass
+    st.session_state.clear()
+    st.rerun()
+
 # ---------------------------------------------------------------------------
-# Unified Sidebar Branding & Sign Out Control
+# Sidebar Setup & Sign Out Button
 # ---------------------------------------------------------------------------
 render_sidebar_brand()
 
@@ -38,20 +50,22 @@ with st.sidebar:
     st.markdown('<span class="hr-pill pill-active">ADMIN</span>', unsafe_allow_html=True)
     st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
     
-    # Fully integrated, prominent Sign Out button
-    if st.button("🚪 Sign Out", use_container_width=True):
-        try:
-            if hasattr(st, "query_params"):
-                st.query_params.clear()
-            else:
-                st.experimental_set_query_params()
-        except Exception:
-            pass
-        st.session_state.clear()
-        st.rerun()
+    # Sidebar Logout Button
+    if st.button("🚪 Sign Out (Sidebar)", use_container_width=True):
+        perform_logout()
 
-st.title("Admin Dashboard")
-st.caption("Manage employee records, payroll data, documents, leave and portal access.")
+# Top Header Layout with an Always-Visible Main Logout Option
+col_title, col_logout = st.columns([4, 1])
+with col_title:
+    st.title("Admin Dashboard")
+    st.caption("Manage employee records, payroll data, documents, leave and portal access.")
+
+with col_logout:
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+    if st.button("🚪 Sign Out", type="primary", use_container_width=True):
+        perform_logout()
+
+st.markdown("---")
 
 # Top Metrics
 employees = get_all_employees()
