@@ -164,36 +164,28 @@ def require_login(role="admin"):
                     background-repeat: no-repeat;
                     background-attachment: fixed;
                 }}
-                .clean-login-card {{
-                    background: rgba(255, 255, 255, 0.95);
-                    backdrop-filter: blur(12px);
-                    border-radius: 20px;
-                    padding: 2.2rem 2rem;
-                    box-shadow: 0 15px 35px rgba(0,0,0,0.25);
-                    border: 1px solid rgba(255, 255, 255, 0.9);
-                    margin-top: 6vh;
-                }}
+                /* Completely remove Streamlit form background box, borders, and extra padding */
                 [data-testid="stForm"] {{
-                    background-color: transparent !important;
-                    border: none !important;
-                    padding: 0 !important;
-                    box-shadow: none !important;
+                    background: rgba(255, 255, 255, 0.95) !important;
+                    backdrop-filter: blur(12px) !important;
+                    border-radius: 20px !important;
+                    padding: 2rem 2rem !important;
+                    box-shadow: 0 15px 35px rgba(0,0,0,0.25) !important;
+                    border: 1px solid rgba(255, 255, 255, 0.9) !important;
                 }}
                 </style>
                 """,
                 unsafe_allow_html=True,
             )
 
-        st.markdown("<div style='height: 4vh;'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height: 8vh;'></div>", unsafe_allow_html=True)
         col_left, col_right = st.columns([1.25, 1.05])
         
         with col_right:
-            st.markdown('<div class="clean-login-card">', unsafe_allow_html=True)
-            
             with st.form("login_form", clear_on_submit=False):
                 username = st.text_input("Username", placeholder="Enter username")
                 password = st.text_input("Password", type="password", placeholder="••••••••")
-                st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+                st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
                 submitted = st.form_submit_button("Sign In to Portal", use_container_width=True)
                 
                 if submitted:
@@ -206,8 +198,6 @@ def require_login(role="admin"):
                         st.rerun()
                     else:
                         st.error("Invalid credentials or unauthorized portal access.")
-            
-            st.markdown('</div>', unsafe_allow_html=True)
         st.stop()
         
     elif st.session_state.get("role") != role:
