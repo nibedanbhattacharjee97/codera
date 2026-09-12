@@ -181,6 +181,7 @@ def calculate_ctc(basic, hra, phonebill, others, esic_if_applicable):
     """
     Computes total CTC including Basic, HRA, Phone Bill, Others, 
     plus Employer PF contribution and Employer ESIC contribution (3.25%).
+    Returns (total_ctc, employer_pf, employer_esic).
     """
     b = float(basic or 0)
     h = float(hra or 0)
