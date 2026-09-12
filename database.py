@@ -40,18 +40,8 @@ def get_connection():
     return conn
 
 
-def _normalize_username(username: str) -> str:
-    """Login usernames are matched case-insensitively and with surrounding
-    whitespace stripped, so a stray space or different capitalization typed
-    on a phone keyboard never silently breaks a login."""
-    return (username or "").strip().lower()
-
-
 def hash_password(password: str) -> str:
-    # Strip whitespace so an accidental leading/trailing space (very common
-    # on mobile keyboards / copy-paste) doesn't produce a different hash
-    # than the one the admin generated.
-    return hashlib.sha256((password or "").strip().encode("utf-8")).hexdigest()
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
 def _ensure_column(cur, table, column, coltype_and_default):
@@ -182,23 +172,12 @@ def init_db():
         _ensure_column(cur, "employees", col, decl)
     conn.commit()
 
-    # --- Username normalization migration ---
-    # Older rows may have been stored with mixed case / stray whitespace
-    # from before usernames were normalized. Normalize them in place so
-    # logins created before this fix don't suddenly break.
-    cur.execute("SELECT id, username FROM users")
-    for row in cur.fetchall():
-        normalized = _normalize_username(row["username"])
-        if normalized != row["username"]:
-            cur.execute("UPDATE users SET username = ? WHERE id = ?", (normalized, row["id"]))
-    conn.commit()
-
     # Seed Default Admin
     cur.execute("SELECT COUNT(*) as c FROM users WHERE role = 'admin'")
     if cur.fetchone()["c"] == 0:
         cur.execute(
             "INSERT INTO users (username, password_hash, role, full_name) VALUES (?, ?, ?, ?)",
-            (_normalize_username("admin"), hash_password("admin123"), "admin", "HR Administrator"),
+            ("admin", hash_password("admin123"), "admin", "HR Administrator"),
         )
         conn.commit()
 
@@ -210,7 +189,7 @@ def authenticate_user(username: str, password: str):
     cur = conn.cursor()
     cur.execute(
         "SELECT * FROM users WHERE username = ? AND password_hash = ?",
-        (_normalize_username(username), hash_password(password)),
+        (username, hash_password(password)),
     )
     row = cur.fetchone()
     conn.close()
@@ -220,17 +199,15 @@ def authenticate_user(username: str, password: str):
 def create_user(username, password, role, employee_code=None, full_name=None):
     conn = get_connection()
     cur = conn.cursor()
-    uname = _normalize_username(username)
     try:
         cur.execute(
             """INSERT INTO users (username, password_hash, role, employee_code, full_name) 
                VALUES (?, ?, ?, ?, ?)""",
-            (uname, hash_password(password), role, employee_code, full_name),
+            (username, hash_password(password), role, employee_code, full_name),
         )
         conn.commit()
         return True
-    except sqlite3.IntegrityError as e:
-        print(f"DB Error: {e}")
+    except sqlite3.IntegrityError:
         return False
     finally:
         conn.close()
@@ -238,9 +215,7 @@ def create_user(username, password, role, employee_code=None, full_name=None):
 
 def username_exists(username: str) -> bool:
     conn = get_connection()
-    row = conn.execute(
-        "SELECT 1 FROM users WHERE username = ?", (_normalize_username(username),)
-    ).fetchone()
+    row = conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone()
     conn.close()
     return row is not None
 
@@ -249,39 +224,8 @@ def change_password(username: str, new_password: str):
     conn = get_connection()
     conn.execute(
         "UPDATE users SET password_hash = ? WHERE username = ?",
-        (hash_password(new_password), _normalize_username(username)),
+        (hash_password(new_password), username),
     )
-    conn.commit()
-    conn.close()
-
-
-def get_user_by_employee_code(employee_code: str, role: str = "employee"):
-    """Look up the portal login (if any) already tied to an employee code.
-    Used by the admin Portal Access tab so a second attempt updates the
-    existing account instead of failing with 'username already taken'."""
-    conn = get_connection()
-    row = conn.execute(
-        "SELECT * FROM users WHERE employee_code = ? AND role = ? ORDER BY id DESC LIMIT 1",
-        (employee_code, role),
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
-
-
-def reset_employee_password(employee_code: str, new_password: str):
-    """Reset the password on the existing employee-portal login tied to this
-    employee_code. Returns the username on success, or None if no login
-    exists yet for this employee (caller should create one instead)."""
-    user = get_user_by_employee_code(employee_code, role="employee")
-    if not user:
-        return None
-    change_password(user["username"], new_password)
-    return user["username"]
-
-
-def delete_user_login(username: str):
-    conn = get_connection()
-    conn.execute("DELETE FROM users WHERE username = ?", (_normalize_username(username),))
     conn.commit()
     conn.close()
 
