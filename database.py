@@ -175,20 +175,19 @@ def change_password(username: str, new_password: str):
 
 
 # ---------------------------------------------------------------------------
-# EMPLOYEES & CTC CALCULATION LOGIC (With Employer Contributions)
+# EMPLOYEES & CTC CALCULATION LOGIC
 # ---------------------------------------------------------------------------
 def calculate_ctc(basic, hra, phonebill, others, esic_if_applicable):
     """
     Computes total CTC including Basic, HRA, Phone Bill, Others, 
-    plus Employer PF contribution (12% of basic, capped at ₹1,800 statutory limit) 
-    and Employer ESIC contribution (3.25%) if ESIC is applicable.
+    plus Employer PF contribution and Employer ESIC contribution (3.25%).
     """
     b = float(basic or 0)
     h = float(hra or 0)
     p = float(phonebill or 0)
     o = float(others or 0)
     
-    # Employer PF: 12% of basic, capped standard at ₹1,800 or actual based on basic
+    # Employer PF: 12% of basic, capped at statutory limit ₹1,800
     employer_pf = min(b * 0.12, 1800.0)
     
     # Employer ESIC: 3.25% of gross wages if ESIC applies
