@@ -1,35 +1,30 @@
-# TEC TANIVA HRMS — FINAL Production Authentication Fix
+# TEC TANIVA HRMS - Authentication Fixed
 
-## Root cause addressed
-Admin and Employee now use one project-local SQLite database: `database/hr_system.db`.
-On first run, if the database has no employees, the bundled `data.xlsx` is imported automatically and a portal login is created for each imported employee.
+## Important fix
+Admin and Employee now use one shared SQLite database at:
+`%USERPROFILE%\.tec_taniva_hrms\hr_system.db` on Windows.
 
-## Default credentials
-Admin: `admin` / `admin123`
-Imported employees: username = employee code, temporary password = `Welcome@123`
+This prevents Admin and Employee from using different copies of `database/hr_system.db`. You can override it with the `HRMS_DB_PATH` environment variable.
 
-## IMPORTANT about TT-EMP-0001
-The `data.xlsx` supplied with the project contains employee codes `TT-EMP-0003` through `TT-EMP-0012`; it does **not** contain `TT-EMP-0001`. Therefore this package cannot legitimately create a profile for TT-EMP-0001 from that spreadsheet. If your real database contains TT-EMP-0001, copy that database to this project's `database/hr_system.db` before first launch, or set `HRMS_DB_PATH` to its path.
+## Start
+1. `pip install -r requirements.txt`
+2. Double-click `run_admin.bat` for Admin.
+3. Double-click `run_employee.bat` for Employee.
 
-## Run
-```powershell
-pip install -r requirements.txt
-streamlit run admin.py
-```
-Then: `admin / admin123`.
+## Default admin
+Username: `admin`
+Password: `admin123`
 
-Employee:
-```powershell
-streamlit run employee_count.py
-```
-For the supplied spreadsheet, test `TT-EMP-0003 / Welcome@123`.
+Change it immediately in production.
 
-## Repair
-```powershell
-python repair_login.py employee TT-EMP-0001 --password Welcome@123
-python repair_login.py admin --password NewStrongAdminPassword123!
-python diagnose_login.py --username TT-EMP-0001 --password Welcome@123
-```
+## Repair employee login
+After Admin selects an employee in Portal Access and clicks Reset Password, the reset now creates the employee portal account if it is missing.
+
+Command line example:
+`python repair_login.py employee TT-EMP-0001 --password Welcome@123`
 
 ## Existing database
-Back up your current `database/hr_system.db` and place the copy into the new project's `database` folder before first launch. If you need to import a database after startup, use `python setup_shared_db.py --source "C:\path\to\hr_system.db" --force`. The code will preserve existing employee passwords.
+On first run, if the shared database does not exist and the project contains `database/hr_system.db`, that local database is copied into the shared location.
+
+## Security
+New passwords use PBKDF2-HMAC-SHA256 with a random salt. Existing legacy SHA-256 password hashes are accepted once and upgraded after successful login. No credentials are accepted from URL query parameters.
