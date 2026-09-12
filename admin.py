@@ -28,7 +28,6 @@ require_login(role="admin")
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Helper function to perform clean logout & reset query params/session state
 def perform_logout():
     try:
         if hasattr(st, "query_params"):
@@ -40,21 +39,15 @@ def perform_logout():
     st.session_state.clear()
     st.rerun()
 
-# ---------------------------------------------------------------------------
-# Sidebar Setup & Sign Out Button
-# ---------------------------------------------------------------------------
 render_sidebar_brand()
 
 with st.sidebar:
     st.markdown(f"**Signed in as** \n{st.session_state.get('username')}")
     st.markdown('<span class="hr-pill pill-active">ADMIN</span>', unsafe_allow_html=True)
     st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
-    
-    # Sidebar Logout Button
     if st.button("🚪 Sign Out (Sidebar)", use_container_width=True):
         perform_logout()
 
-# Top Header Layout with an Always-Visible Main Logout Option
 col_title, col_logout = st.columns([4, 1])
 with col_title:
     st.title("Admin Dashboard")
@@ -67,7 +60,6 @@ with col_logout:
 
 st.markdown("---")
 
-# Top Metrics
 employees = get_all_employees()
 total_emp = employee_count()
 active_emp = len([e for e in employees if e["status"] == "Active"])
@@ -86,9 +78,6 @@ tab_add, tab_directory, tab_leaves, tab_access, tab_announce = st.tabs(
     ["➕ Onboard Employee", "📇 Employee Directory", "🗓️ Leave Approvals", "🔐 Portal Access", "📢 Announcements"]
 )
 
-# ---------------------------------------------------------------------------
-# TAB 1 — Onboard / Edit Employee Form
-# ---------------------------------------------------------------------------
 with tab_add:
     edit_mode = st.session_state.get("edit_employee_code") is not None
     if edit_mode:
@@ -129,7 +118,7 @@ with tab_add:
             emergency_contact_number = st.text_input("Emergency Contact Number", value=emp.get("emergency_contact_number", ""))
 
         st.markdown("---")
-        st.subheader("Salary Structure & Deductions")
+        st.subheader("Salary Structure & Contributions / Deductions")
         s1, s2, s3, s4 = st.columns(4)
         with s1: basic_pay = st.number_input("Basic Pay (₹)", min_value=0.0, value=float(emp.get("basic_pay", 30000.0) or 30000.0), step=500.0)
         with s2: hra = st.number_input("HRA (₹)", min_value=0.0, value=float(emp.get("hra", 5000.0) or 5000.0), step=500.0)
@@ -137,17 +126,17 @@ with tab_add:
         with s4: others = st.number_input("Others (₹)", min_value=0.0, value=float(emp.get("others", 20000.0) or 20000.0), step=500.0)
 
         s5, s6, s7 = st.columns(3)
-        with s5: pf = st.number_input("PF (₹)", min_value=0.0, value=float(emp.get("pf", 1800.0) or 1800.0), step=100.0)
+        with s5: pf = st.number_input("Employee PF (₹)", min_value=0.0, value=float(emp.get("pf", 1800.0) or 1800.0), step=100.0)
         with s6: esic_if_applicable = st.selectbox("ESIC Applicable?", ["No", "Yes"], index=1 if emp.get("esic_if_applicable") == "Yes" else 0)
         with s7: food_reimbursement = st.selectbox("Food Reimbursement?", ["No", "Yes"], index=1 if emp.get("food_reimbursement") == "Yes" else 0)
 
-        # Dynamic Calculation for Total CTC Display Box
-        live_ctc = calculate_ctc(basic_pay, hra, phonebill_pay, others, esic_if_applicable)
+        # Dynamic Calculation including Employer Shares
+        live_ctc, live_employer_pf, live_employer_esic = calculate_ctc(basic_pay, hra, phonebill_pay, others, esic_if_applicable)
         
         st.markdown(
             f"""
             <div class="hr-metric" style="margin-top:8px;">
-                <div class="label">CALCULATED CTC = BASIC + HRA + OTHERS + PHONE BILL {'− ₹1,000 (ESIC Deduction)' if esic_if_applicable=='Yes' else ''}</div>
+                <div class="label">CALCULATED CTC = BASIC + HRA + OTHERS + PHONE BILL + EMPLOYER PF (₹{live_employer_pf:,.2f}) {f"+ EMPLOYER ESIC (₹{live_employer_esic:,.2f})" if esic_if_applicable=='Yes' else ''}</div>
                 <div class="value" style="font-size: 1.8rem; color: #17b6a7;">₹ {live_ctc:,.2f}</div>
             </div>
             """,
@@ -203,7 +192,9 @@ with tab_add:
                     "phonebill_pay": phonebill_pay,
                     "others": others,
                     "pf": pf,
+                    "employer_pf": live_employer_pf,
                     "esic_if_applicable": esic_if_applicable,
+                    "employer_esic": live_employer_esic,
                     "food_reimbursement": food_reimbursement,
                     "ctc": live_ctc,
                     "pic_path": save_file(upload_pic, "pic_path"),
@@ -228,9 +219,6 @@ with tab_add:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------------
-# TAB 2 — Employee Directory (Full Master Data View + Filtered Export)
-# ---------------------------------------------------------------------------
 with tab_directory:
     st.subheader("Employee Master Directory")
     if not employees:
@@ -239,7 +227,6 @@ with tab_directory:
         search = st.text_input("🔍 Search employees by name, code, designation, mobile, email, place, etc.")
         df = pd.DataFrame(employees)
         
-        # Display all available onboarding columns in the directory table view
         view = df.copy()
         if search:
             mask = view.apply(lambda r: search.lower() in " ".join(str(v).lower() for v in r), axis=1)
@@ -265,7 +252,6 @@ with tab_directory:
                 st.success("Employee record deleted.")
                 st.rerun()
 
-        # Export CSV button containing filtered view rows with all master fields
         csv_data = view.to_csv(index=False).encode("utf-8")
         st.download_button(
             "⬇️ Export Filtered Master Directory to Excel / CSV", 
@@ -275,9 +261,6 @@ with tab_directory:
             use_container_width=True
         )
 
-# ---------------------------------------------------------------------------
-# TAB 3 — Leave Approvals
-# ---------------------------------------------------------------------------
 with tab_leaves:
     st.subheader("Employee Leave Requests")
     reqs = get_leave_requests()
@@ -306,9 +289,6 @@ with tab_leaves:
                             st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------------
-# TAB 4 — Portal Access Setup
-# ---------------------------------------------------------------------------
 with tab_access:
     st.subheader("Create Employee Portal Login Account")
     if not employees:
@@ -331,9 +311,6 @@ with tab_access:
                     else:
                         st.error("Failed to create user login account.")
 
-# ---------------------------------------------------------------------------
-# TAB 5 — Announcements
-# ---------------------------------------------------------------------------
 with tab_announce:
     st.subheader("Publish Company Announcements")
     with st.form("announce_form"):
