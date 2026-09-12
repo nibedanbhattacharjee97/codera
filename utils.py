@@ -7,10 +7,71 @@ for TEC TANIVA HRMS.
 import streamlit as st
 import base64
 import os
+import hashlib
 from database import authenticate_user
 
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+SESSION_SECRET = "TEC_TANIVA_HRMS_PERSISTENT_KEY_2026"
 
+# ---------------------------------------------------------------------------
+# Session Persistence Helpers (Preserves Login Across Browser Refresh)
+# ---------------------------------------------------------------------------
+def _make_token(username, role, employee_code):
+    emp = str(employee_code or "")
+    raw = f"{username}|{role}|{emp}|{SESSION_SECRET}"
+    sig = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    data = f"{username}:{role}:{emp}:{sig}"
+    return base64.urlsafe_b64encode(data.encode()).decode()
+
+def _verify_token(token):
+    try:
+        data = base64.urlsafe_b64decode(token.encode()).decode()
+        parts = data.split(":")
+        if len(parts) != 4:
+            return None
+        username, role, emp, sig = parts
+        expected_raw = f"{username}|{role}|{emp}|{SESSION_SECRET}"
+        expected_sig = hashlib.sha256(expected_raw.encode()).hexdigest()[:16]
+        if sig == expected_sig:
+            return {"username": username, "role": role, "employee_code": emp}
+    except Exception:
+        pass
+    return None
+
+def _get_query_param(key, default=None):
+    try:
+        if hasattr(st, "query_params"):
+            return st.query_params.get(key, default)
+        params = st.experimental_get_query_params()
+        vals = params.get(key, [])
+        return vals[0] if vals else default
+    except Exception:
+        return default
+
+def _set_query_param(key, value):
+    try:
+        if hasattr(st, "query_params"):
+            st.query_params[key] = value
+        else:
+            params = st.experimental_get_query_params()
+            params[key] = value
+            st.experimental_set_query_params(**params)
+    except Exception:
+        pass
+
+def _clear_query_params():
+    try:
+        if hasattr(st, "query_params"):
+            st.query_params.clear()
+        else:
+            st.experimental_set_query_params()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# UI Assets & Styling
+# ---------------------------------------------------------------------------
 def get_base64_image(image_path):
     if os.path.exists(image_path):
         with open(image_path, "rb") as f:
@@ -148,11 +209,18 @@ def render_sidebar_brand():
         st.markdown("---")
 
 def require_login(role="admin"):
-    # Ensure session state persistence flags are secure
-    if "authenticated" not in st.session_state:
-        st.session_state["authenticated"] = False
+    # Restore session automatically from persistent URL token on browser refresh
+    if not st.session_state.get("authenticated"):
+        auth_token = _get_query_param("auth")
+        if auth_token:
+            session_data = _verify_token(auth_token)
+            if session_data and session_data["role"] == role:
+                st.session_state["authenticated"] = True
+                st.session_state["username"] = session_data["username"]
+                st.session_state["role"] = session_data["role"]
+                st.session_state["employee_code"] = session_data["employee_code"]
 
-    if not st.session_state["authenticated"]:
+    if not st.session_state.get("authenticated"):
         bg_filename = "admin_bg.png" if role == "admin" else "employee_bg.png"
         bg_path = os.path.join(ASSETS_DIR, bg_filename)
         bg_b64 = get_base64_image(bg_path)
@@ -195,10 +263,12 @@ def require_login(role="admin"):
                 if submitted:
                     user = authenticate_user(username, password)
                     if user and user["role"] == role:
+                        token = _make_token(user["username"], user["role"], user.get("employee_code"))
+                        _set_query_param("auth", token)
                         st.session_state["authenticated"] = True
                         st.session_state["username"] = user["username"]
                         st.session_state["role"] = user["role"]
-                        st.session_state["employee_code"] = user["employee_code"]
+                        st.session_state["employee_code"] = user.get("employee_code")
                         st.rerun()
                     else:
                         st.error("Invalid credentials or unauthorized portal access.")
@@ -207,6 +277,7 @@ def require_login(role="admin"):
     elif st.session_state.get("role") != role:
         st.warning(f"Active session mismatch: Logged in as {st.session_state.get('role')}. Please sign out first.")
         if st.button("Sign Out"):
+            _clear_query_params()
             st.session_state.clear()
             st.rerun()
         st.stop()
@@ -215,6 +286,7 @@ def logout_button():
     with st.sidebar:
         st.markdown("---")
         if st.button("🚪 Sign Out", use_container_width=True):
+            _clear_query_params()
             st.session_state.clear()
             st.rerun()
 
