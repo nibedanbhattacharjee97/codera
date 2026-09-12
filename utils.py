@@ -7,21 +7,31 @@ for TEC TANIVA HRMS.
 import streamlit as st
 import base64
 import os
+import hmac
 import hashlib
 from database import authenticate_user
 
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
-SESSION_SECRET = "TEC_TANIVA_HRMS_PERSISTENT_KEY_2026"
+
+# In production, set this via an environment variable instead of hardcoding it,
+# e.g.  export HRMS_SESSION_SECRET="a-long-random-string"
+SESSION_SECRET = os.environ.get("HRMS_SESSION_SECRET", "TEC_TANIVA_HRMS_PERSISTENT_KEY_2026")
 
 # ---------------------------------------------------------------------------
 # Session Persistence Helpers (Preserves Login Across Browser Refresh)
 # ---------------------------------------------------------------------------
+def _sign(payload: str) -> str:
+    """HMAC-SHA256 signature, constant-time-comparable, keyed with SESSION_SECRET."""
+    return hmac.new(SESSION_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
+
+
 def _make_token(username, role, employee_code):
     emp = str(employee_code or "")
-    raw = f"{username}|{role}|{emp}|{SESSION_SECRET}"
-    sig = hashlib.sha256(raw.encode()).hexdigest()[:16]
-    data = f"{username}:{role}:{emp}:{sig}"
+    payload = f"{username}:{role}:{emp}"
+    sig = _sign(payload)
+    data = f"{payload}:{sig}"
     return base64.urlsafe_b64encode(data.encode()).decode()
+
 
 def _verify_token(token):
     try:
@@ -30,13 +40,14 @@ def _verify_token(token):
         if len(parts) != 4:
             return None
         username, role, emp, sig = parts
-        expected_raw = f"{username}|{role}|{emp}|{SESSION_SECRET}"
-        expected_sig = hashlib.sha256(expected_raw.encode()).hexdigest()[:16]
-        if sig == expected_sig:
+        payload = f"{username}:{role}:{emp}"
+        expected_sig = _sign(payload)
+        if hmac.compare_digest(sig, expected_sig):
             return {"username": username, "role": role, "employee_code": emp}
     except Exception:
         pass
     return None
+
 
 def _get_query_param(key, default=None):
     try:
@@ -48,6 +59,7 @@ def _get_query_param(key, default=None):
     except Exception:
         return default
 
+
 def _set_query_param(key, value):
     try:
         if hasattr(st, "query_params"):
@@ -58,6 +70,7 @@ def _set_query_param(key, value):
             st.experimental_set_query_params(**params)
     except Exception:
         pass
+
 
 def _clear_query_params():
     try:
@@ -78,8 +91,10 @@ def get_base64_image(image_path):
             return base64.b64encode(f.read()).decode()
     return ""
 
+
 def logo_base64():
     return get_base64_image(os.path.join(ASSETS_DIR, "logo.png"))
+
 
 PALETTE = {
     "navy": "#0b1c2c",
@@ -92,6 +107,7 @@ PALETTE = {
     "text": "#0f172a",
     "muted": "#64748b",
 }
+
 
 def inject_css():
     st.markdown(
@@ -118,7 +134,7 @@ def inject_css():
         section[data-testid="stSidebar"] * {{
             color: #ffffff !important;
         }}
-        
+
         /* Force Sidebar Buttons to be Highly Visible */
         section[data-testid="stSidebar"] .stButton > button {{
             background-color: rgba(23, 182, 167, 0.15) !important;
@@ -199,15 +215,27 @@ def inject_css():
             background-color: #f1f5f9 !important;
             color: #0f172a !important;
         }}
+        /* Today's date (unselected) - subtle outline instead of a hard filled pill,
+           so it doesn't get confused with the actually selected day */
+        div[data-baseweb="calendar"] [aria-label*="Today"]:not([aria-selected="true"]) {{
+            border: 1.5px solid {PALETTE['teal']} !important;
+            border-radius: 8px !important;
+            background-color: transparent !important;
+            color: {PALETTE['teal_dark']} !important;
+            -webkit-text-fill-color: {PALETTE['teal_dark']} !important;
+        }}
+        /* Actually selected date - solid teal fill */
         div[data-baseweb="calendar"] [aria-selected="true"] {{
             background-color: {PALETTE['teal']} !important;
             color: #ffffff !important;
             -webkit-text-fill-color: #ffffff !important;
+            border-radius: 8px !important;
         }}
         </style>
         """,
         unsafe_allow_html=True,
     )
+
 
 def render_sidebar_brand():
     logo_b64 = logo_base64()
@@ -229,6 +257,7 @@ def render_sidebar_brand():
             st.markdown("### 🏢 TEC TANIVA HRMS")
         st.markdown("---")
 
+
 def require_login(role="admin"):
     if not st.session_state.get("authenticated"):
         auth_token = _get_query_param("auth")
@@ -244,7 +273,7 @@ def require_login(role="admin"):
         bg_filename = "admin_bg.png" if role == "admin" else "employee_bg.png"
         bg_path = os.path.join(ASSETS_DIR, bg_filename)
         bg_b64 = get_base64_image(bg_path)
-        
+
         if bg_b64:
             st.markdown(
                 f"""
@@ -271,14 +300,14 @@ def require_login(role="admin"):
 
         st.markdown("<div style='height: 8vh;'></div>", unsafe_allow_html=True)
         col_left, col_right = st.columns([1.25, 1.05])
-        
+
         with col_right:
             with st.form("login_form", clear_on_submit=False):
                 username = st.text_input("Username", placeholder="Enter username")
                 password = st.text_input("Password", type="password", placeholder="••••••••")
                 st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
                 submitted = st.form_submit_button("Sign In to Portal", use_container_width=True)
-                
+
                 if submitted:
                     user = authenticate_user(username, password)
                     if user and user["role"] == role:
@@ -292,7 +321,7 @@ def require_login(role="admin"):
                     else:
                         st.error("Invalid credentials or unauthorized portal access.")
         st.stop()
-        
+
     elif st.session_state.get("role") != role:
         st.warning(f"Active session mismatch: Logged in as {st.session_state.get('role')}. Please sign out first.")
         if st.button("Sign Out"):
@@ -301,6 +330,7 @@ def require_login(role="admin"):
             st.rerun()
         st.stop()
 
+
 def logout_button():
     with st.sidebar:
         st.markdown("---")
@@ -308,6 +338,7 @@ def logout_button():
             _clear_query_params()
             st.session_state.clear()
             st.rerun()
+
 
 def metric_card(label, value):
     st.markdown(
@@ -319,6 +350,7 @@ def metric_card(label, value):
         """,
         unsafe_allow_html=True,
     )
+
 
 def status_pill(status):
     cls = "pill-pending"

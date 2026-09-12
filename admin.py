@@ -28,6 +28,7 @@ require_login(role="admin")
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+
 def perform_logout():
     try:
         if hasattr(st, "query_params"):
@@ -38,6 +39,7 @@ def perform_logout():
         pass
     st.session_state.clear()
     st.rerun()
+
 
 render_sidebar_brand()
 
@@ -118,26 +120,53 @@ with tab_add:
             emergency_contact_number = st.text_input("Emergency Contact Number", value=emp.get("emergency_contact_number", ""))
 
         st.markdown("---")
-        st.subheader("Salary Structure & Contributions / Deductions")
+        st.subheader("Salary Structure & Statutory Contributions / Deductions")
         s1, s2, s3, s4 = st.columns(4)
         with s1: basic_pay = st.number_input("Basic Pay (₹)", min_value=0.0, value=float(emp.get("basic_pay", 30000.0) or 30000.0), step=500.0)
         with s2: hra = st.number_input("HRA (₹)", min_value=0.0, value=float(emp.get("hra", 5000.0) or 5000.0), step=500.0)
         with s3: phonebill_pay = st.number_input("Phone Bill (₹)", min_value=0.0, value=float(emp.get("phonebill_pay", 2000.0) or 2000.0), step=100.0)
         with s4: others = st.number_input("Others (₹)", min_value=0.0, value=float(emp.get("others", 20000.0) or 20000.0), step=500.0)
 
-        s5, s6, s7 = st.columns(3)
-        with s5: pf = st.number_input("Employee PF (₹)", min_value=0.0, value=float(emp.get("pf", 1800.0) or 1800.0), step=100.0)
+        s6, s7 = st.columns(2)
         with s6: esic_if_applicable = st.selectbox("ESIC Applicable?", ["No", "Yes"], index=1 if emp.get("esic_if_applicable") == "Yes" else 0)
         with s7: food_reimbursement = st.selectbox("Food Reimbursement?", ["No", "Yes"], index=1 if emp.get("food_reimbursement") == "Yes" else 0)
 
-        # Unpacking the 3 values from calculate_ctc cleanly
-        live_ctc, live_employer_pf, live_employer_esic = calculate_ctc(basic_pay, hra, phonebill_pay, others, esic_if_applicable)
-        
+        # Live statutory calculation (recomputes on every widget interaction)
+        live_ctc, bd = calculate_ctc(basic_pay, hra, phonebill_pay, others, esic_if_applicable)
+
+        st.markdown("###### Suggested statutory deductions (editable below)")
+        s5, = st.columns(1)
+        with s5:
+            pf = st.number_input(
+                "Employee PF Deduction (₹)",
+                min_value=0.0,
+                value=float(emp.get("pf")) if emp.get("pf") not in (None, 0) else bd["employee_pf"],
+                step=50.0,
+                help=f"Statutory suggestion: 12% of PF wage (₹{bd['pf_wage']:,.0f}) = ₹{bd['employee_pf']:,.2f}",
+            )
+
+        esic_note = ""
+        if esic_if_applicable == "Yes" and not bd["esic_eligible"]:
+            esic_note = f" ⚠️ Gross wage ₹{bd['gross']:,.0f} exceeds the ESI wage ceiling (₹21,000) — ESIC will NOT be applied."
+
         st.markdown(
             f"""
-            <div class="hr-metric" style="margin-top:8px;">
-                <div class="label">CALCULATED CTC = BASIC + HRA + OTHERS + PHONE BILL + EMPLOYER PF (₹{live_employer_pf:,.2f}) {f"+ EMPLOYER ESIC (₹{live_employer_esic:,.2f})" if esic_if_applicable=='Yes' else ''}</div>
+            <div class="hr-metric" style="margin-top:8px; text-align:left;">
+                <div class="label">STATUTORY BREAKDOWN</div>
+                <table style="width:100%; color:#e2e8f0; font-size:0.85rem; margin-top:8px; border-collapse:collapse;">
+                    <tr><td>Gross (Basic + HRA + Phone + Others)</td><td style="text-align:right;">₹ {bd['gross']:,.2f}</td></tr>
+                    <tr><td>PF Wage (Basic, capped at ₹15,000)</td><td style="text-align:right;">₹ {bd['pf_wage']:,.2f}</td></tr>
+                    <tr><td>Employer EPF (3.67%)</td><td style="text-align:right;">₹ {bd['employer_epf']:,.2f}</td></tr>
+                    <tr><td>Employer EPS (8.33%, capped ₹1,250)</td><td style="text-align:right;">₹ {bd['employer_eps']:,.2f}</td></tr>
+                    <tr><td>Employer EDLI (0.5%)</td><td style="text-align:right;">₹ {bd['employer_edli']:,.2f}</td></tr>
+                    <tr><td>EPFO Admin Charges (0.5%)</td><td style="text-align:right;">₹ {bd['employer_admin_charges']:,.2f}</td></tr>
+                    <tr><td><b>Employer PF Total</b></td><td style="text-align:right;"><b>₹ {bd['employer_pf_total']:,.2f}</b></td></tr>
+                    <tr><td>Employer ESIC (3.25%){' — eligible' if bd['esic_eligible'] else ' — not applied'}</td><td style="text-align:right;">₹ {bd['employer_esic']:,.2f}</td></tr>
+                    <tr><td>Employee ESIC (0.75%){' — eligible' if bd['esic_eligible'] else ' — not applied'}</td><td style="text-align:right;">₹ {bd['employee_esic']:,.2f}</td></tr>
+                </table>
+                <div class="label" style="margin-top:12px;">CALCULATED CTC = GROSS + EMPLOYER PF TOTAL + EMPLOYER ESIC</div>
                 <div class="value" style="font-size: 1.8rem; color: #17b6a7;">₹ {live_ctc:,.2f}</div>
+                {f'<div style="color:#fbbf24; font-size:0.8rem; margin-top:6px;">{esic_note}</div>' if esic_note else ''}
             </div>
             """,
             unsafe_allow_html=True,
@@ -191,10 +220,17 @@ with tab_add:
                     "hra": hra,
                     "phonebill_pay": phonebill_pay,
                     "others": others,
+                    "pf_wage": bd["pf_wage"],
                     "pf": pf,
-                    "employer_pf": live_employer_pf,
+                    "employer_pf": bd["employer_epf"],
+                    "employer_eps": bd["employer_eps"],
+                    "employer_edli": bd["employer_edli"],
+                    "employer_admin_charges": bd["employer_admin_charges"],
+                    "employer_pf_total": bd["employer_pf_total"],
                     "esic_if_applicable": esic_if_applicable,
-                    "employer_esic": live_employer_esic,
+                    "esic_eligible_by_wage": 1 if bd["esic_eligible"] else 0,
+                    "employer_esic": bd["employer_esic"],
+                    "employee_esic": bd["employee_esic"],
                     "food_reimbursement": food_reimbursement,
                     "ctc": live_ctc,
                     "pic_path": save_file(upload_pic, "pic_path"),
@@ -226,7 +262,7 @@ with tab_directory:
     else:
         search = st.text_input("🔍 Search employees by name, code, designation, mobile, email, place, etc.")
         df = pd.DataFrame(employees)
-        
+
         view = df.copy()
         if search:
             mask = view.apply(lambda r: search.lower() in " ".join(str(v).lower() for v in r), axis=1)
@@ -254,9 +290,9 @@ with tab_directory:
 
         csv_data = view.to_csv(index=False).encode("utf-8")
         st.download_button(
-            "⬇️ Export Filtered Master Directory to Excel / CSV", 
-            csv_data, 
-            "employee_master_directory.csv", 
+            "⬇️ Export Filtered Master Directory to Excel / CSV",
+            csv_data,
+            "employee_master_directory.csv",
             "text/csv",
             use_container_width=True
         )

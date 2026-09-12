@@ -98,13 +98,22 @@ with tab_payslip:
     s3.metric("Phone Bill", f"₹{emp.get('phonebill_pay', 0):,.0f}")
     s4.metric("Others", f"₹{emp.get('others', 0):,.0f}")
 
-    s5, s6, s7 = st.columns(3)
-    s5.metric("PF Deduction", f"₹{emp.get('pf', 0):,.0f}")
-    s6.metric("ESIC Applicable", emp.get("esic_if_applicable", "No"))
-    s7.metric("Food Reimbursement", emp.get("food_reimbursement", "No"))
+    st.markdown("---")
+    st.markdown("##### Deductions (from your gross pay)")
+    d1, d2 = st.columns(2)
+    d1.metric("Employee PF", f"₹{emp.get('pf', 0):,.0f}")
+    esic_applicable = emp.get("esic_if_applicable", "No") == "Yes" and emp.get("esic_eligible_by_wage")
+    d2.metric("Employee ESIC (0.75%)", f"₹{emp.get('employee_esic', 0):,.0f}" if esic_applicable else "Not Applicable")
 
     st.markdown("---")
-    note = " (₹1,000 deducted for ESIC applicable)" if emp.get("esic_if_applicable") == "Yes" else ""
+    st.markdown("##### Employer Contributions (paid on top of your gross, part of CTC)")
+    e1, e2, e3 = st.columns(3)
+    e1.metric("Employer PF (EPF+EPS+EDLI+Admin)", f"₹{emp.get('employer_pf_total', 0):,.0f}")
+    e2.metric("Employer ESIC (3.25%)", f"₹{emp.get('employer_esic', 0):,.0f}" if esic_applicable else "Not Applicable")
+    e3.metric("ESIC Status", "Eligible" if esic_applicable else "Not Applicable")
+
+    st.markdown("---")
+    note = " (includes statutory ESIC employer contribution)" if esic_applicable else ""
     st.markdown(
         f"""
         <div class="hr-metric">
@@ -113,6 +122,11 @@ with tab_payslip:
         </div>
         """,
         unsafe_allow_html=True,
+    )
+    st.caption(
+        "CTC = Basic + HRA + Phone Bill + Others + Employer PF (EPF 3.67% + EPS 8.33%, capped ₹1,250 "
+        "+ EDLI 0.5% + Admin Charges 0.5%, all on PF wage capped at ₹15,000) + Employer ESIC (3.25% of "
+        "gross, only if gross ≤ ₹21,000 and ESIC is marked applicable)."
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
