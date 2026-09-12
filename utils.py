@@ -148,7 +148,11 @@ def render_sidebar_brand():
         st.markdown("---")
 
 def require_login(role="admin"):
-    if "authenticated" not in st.session_state or not st.session_state["authenticated"]:
+    # Ensure session state persistence flags are secure
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+
+    if not st.session_state["authenticated"]:
         bg_filename = "admin_bg.png" if role == "admin" else "employee_bg.png"
         bg_path = os.path.join(ASSETS_DIR, bg_filename)
         bg_b64 = get_base64_image(bg_path)
