@@ -409,10 +409,10 @@ with tab_access:
                         uname = reset_employee_password(sel_emp_code, pwd)
                         if uname:
                             st.session_state["last_generated_creds"] = {"username": uname, "password": pwd}
-                            st.success("Password reset successfully.")
+                            st.success(f"Portal password is ready for {uname}. Use the credentials shown below.")
                             st.rerun()
                         else:
-                            st.error("Could not reset password — no login found for this employee.")
+                            st.error("Could not create/reset the portal login. Check that the employee record exists and that the username is not used by another account.")
         else:
             with st.form("access_form"):
                 new_username = st.text_input("Username", value=sel_emp_code)

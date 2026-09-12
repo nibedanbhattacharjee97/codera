@@ -1,47 +1,48 @@
-# TEC TANIVA HRMS — Production Login Fix
+# TEC TANIVA HRMS — Production Authentication Fix
 
-## Run the employee portal
-```bash
+## Default admin
+- Username: `admin`
+- Password: `admin123` **only if the database had no admin account before first startup**.
+
+The application does not overwrite existing admin passwords on startup.
+
+## Start Admin
+```powershell
 python -m pip install -r requirements.txt
-streamlit run employee_count.py
-```
-
-## Run the admin portal
-```bash
 streamlit run admin.py
 ```
 
-### Default admin
-On a fresh deployment, the application automatically creates the admin account:
-
-- Username: `admin`
-- Password: `admin123`
-
-Set `HRMS_ADMIN_PASSWORD` before first startup if you want a different initial password. Existing admin accounts are never overwritten. Change the default password after first deployment. New passwords are stored with salted PBKDF2-SHA256; old SHA-256 passwords remain compatible and are automatically upgraded after a successful login.
-
-### Employee login
-The employee username is the username shown by **Admin → Portal Access**. It is normalized to lowercase and surrounding username whitespace is ignored.
-
-If Admin shows **"This employee already has a portal login"**, do **not** create another account. Use **Reset Password**, then sign in with the displayed username and the new password.
-
-### Important production change
-The employee portal no longer uses a URL `auth=` token. Authentication is stored in the Streamlit session, which avoids stale/shared login tokens and role-mismatch problems.
-
-### Import the supplied Excel data (optional)
-Only do this if your SQLite database does not already contain the employee records:
-
-Windows PowerShell:
+## Start Employee Portal
 ```powershell
-$env:INITIAL_EMPLOYEE_PASSWORD="Temporary@123"
-python seed_from_excel.py
+streamlit run employee_count.py
 ```
 
-Then change the employee passwords from Admin → Portal Access.
+## Repair an admin password
+If `admin / admin123` fails because your existing database has a different/old admin password:
+```powershell
+python repair_login.py admin
+```
+Enter a new password with at least 8 characters.
 
-## Troubleshooting
-1. Restart Streamlit after replacing the files.
-2. Clear the browser tab/session if an old login page remains.
-3. In Admin → Portal Access, select the exact employee and reset the password.
-4. Make sure the employee account is linked to the same employee code as the employee master record.
-5. Do not delete `database/hr_system.db` unless you intentionally want to start over.
-6. For multi-user production hosting, use a persistent SQLite volume or migrate the data layer to PostgreSQL; ephemeral hosting can otherwise lose SQLite changes on redeploy.
+## Repair an employee login
+For the employee shown in the screenshot:
+```powershell
+python repair_login.py employee TT-EMP-0001 --password Welcome@123
+```
+
+This will update the existing linked employee account. If the account is missing, it will create exactly one account using `tt-emp-0001`.
+
+## Why this version fixes the problem
+1. Username matching is case-insensitive and trims accidental surrounding whitespace.
+2. Employee codes are normalized to uppercase when looking up linked accounts.
+3. The Admin reset action really writes the new password hash to the same SQLite database used by the portal.
+4. If an employee record exists but its portal login was deleted, Admin reset recreates the one-to-one login.
+5. Legacy SHA-256 password hashes continue to work and are upgraded after a successful login.
+6. New passwords use salted PBKDF2-SHA256.
+7. No URL `auth=` login token is used. Authentication is stored in the Streamlit session.
+
+## Important deployment rule
+Keep the `database/hr_system.db` file on persistent storage. Do not deploy SQLite on an ephemeral filesystem if you need data to survive restarts/redeployments. For multiple production instances, migrate the database to PostgreSQL.
+
+## If the browser keeps an old session
+Close the old portal tab completely and open the current Streamlit URL again. The new version does not rely on URL authentication tokens.

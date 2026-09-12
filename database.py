@@ -42,7 +42,12 @@ def get_connection() -> sqlite3.Connection:
 
 
 def _normalize_username(username: str) -> str:
-    return (username or "").strip().lower()
+    # Usernames are identifiers: always trim and compare case-insensitively.
+    return (username or "").strip().casefold()
+
+
+def _normalize_employee_code(employee_code: str) -> str:
+    return (employee_code or "").strip().upper()
 
 
 def hash_password(password: str) -> str:
@@ -189,7 +194,7 @@ def init_db() -> None:
 
     # Ensure a usable admin account exists on a fresh deployment.
     # Existing admin accounts are NEVER overwritten.
-    admin = cur.execute("SELECT id, password_hash FROM users WHERE username='admin' AND role='admin'").fetchone()
+    admin = cur.execute("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").fetchone()
     if admin is None:
         default_admin_password = os.getenv("HRMS_ADMIN_PASSWORD", "admin123")
         if len(default_admin_password) < 8:
@@ -204,30 +209,49 @@ def init_db() -> None:
 
 
 def authenticate_user(username: str, password: str):
+    """Authenticate an account and transparently upgrade legacy SHA-256 hashes."""
     uname = _normalize_username(username)
     if not uname or password is None:
         return None
+
     conn = get_connection()
-    row = conn.execute("SELECT * FROM users WHERE username=?", (uname,)).fetchone()
-    if not row:
+    try:
+        row = conn.execute(
+            "SELECT * FROM users WHERE lower(trim(username))=? LIMIT 1", (uname,)
+        ).fetchone()
+        if not row:
+            return None
+
+        valid, legacy = _verify_password(password, row["password_hash"])
+        # Temporary passwords created by the admin are trimmed. Accepting a
+        # surrounding browser-autofill space prevents an otherwise confusing
+        # login failure while preserving spaces inside a password.
+        if not valid and password != password.strip():
+            valid, legacy = _verify_password(password.strip(), row["password_hash"])
+        if not valid:
+            return None
+
+        if legacy:
+            conn.execute(
+                "UPDATE users SET password_hash=? WHERE id=?",
+                (hash_password(password.strip() if password != password.strip() else password), row["id"]),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone()
+
+        result = dict(row)
+        return result
+    finally:
         conn.close()
-        return None
-    valid, legacy = _verify_password(password, row["password_hash"])
-    if not valid:
-        conn.close()
-        return None
-    if legacy:
-        conn.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(password), row["id"]))
-        conn.commit()
-        row = conn.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone()
-    result = dict(row)
-    conn.close()
-    return result
 
 
 def create_user(username, password, role, employee_code=None, full_name=None):
     uname = _normalize_username(username)
+    employee_code = _normalize_employee_code(employee_code) if employee_code else None
+    password = password.strip() if isinstance(password, str) else password
     if not uname or not password or role not in {"admin", "employee"}:
+        return False
+    if len(password) < 8:
         return False
     if role == "employee" and not employee_code:
         return False
@@ -253,28 +277,59 @@ def username_exists(username: str) -> bool:
 
 
 def change_password(username: str, new_password: str) -> bool:
+    new_password = new_password.strip() if isinstance(new_password, str) else new_password
     if len(new_password or "") < 8:
         return False
     conn = get_connection()
-    cur = conn.execute("UPDATE users SET password_hash=? WHERE username=?", (hash_password(new_password), _normalize_username(username)))
-    conn.commit()
-    ok = cur.rowcount == 1
-    conn.close()
-    return ok
+    try:
+        cur = conn.execute(
+            "UPDATE users SET password_hash=? WHERE lower(trim(username))=?",
+            (hash_password(new_password), _normalize_username(username)),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+    finally:
+        conn.close()
 
 
 def get_user_by_employee_code(employee_code: str, role: str = "employee"):
+    code = _normalize_employee_code(employee_code)
     conn = get_connection()
-    row = conn.execute("SELECT * FROM users WHERE employee_code=? AND role=? ORDER BY id DESC LIMIT 1", (employee_code, role)).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    try:
+        row = conn.execute(
+            "SELECT * FROM users WHERE upper(trim(employee_code))=? AND role=? ORDER BY id DESC LIMIT 1",
+            (code, role),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def reset_employee_password(employee_code: str, new_password: str):
-    user = get_user_by_employee_code(employee_code, "employee")
-    if not user or len(new_password or "") < 8:
+    code = _normalize_employee_code(employee_code)
+    new_password = new_password.strip() if isinstance(new_password, str) else new_password
+    if len(new_password or "") < 8:
         return None
-    return user["username"] if change_password(user["username"], new_password) else None
+
+    user = get_user_by_employee_code(code, "employee")
+    if user:
+        return user["username"] if change_password(user["username"], new_password) else None
+
+    # Self-healing path: if the employee record exists but its portal login
+    # was lost/deleted, create the one-to-one login instead of leaving HR
+    # with an apparently successful reset that cannot be used.
+    emp = get_employee(code)
+    if not emp:
+        return None
+
+    username = code.casefold()
+    if username_exists(username):
+        # Username belongs to another account; do not hijack it.
+        return None
+
+    if create_user(username, new_password, "employee", code, emp.get("employee_name")):
+        return username
+    return None
 
 
 def delete_user_login(username: str):
@@ -282,6 +337,30 @@ def delete_user_login(username: str):
     conn.execute("DELETE FROM users WHERE username=?", (_normalize_username(username),))
     conn.commit(); conn.close()
 
+
+
+def reset_admin_password(new_password: str, username: str = "admin") -> bool:
+    """Explicitly reset an admin password. Never called automatically on startup."""
+    return change_password(username, new_password)
+
+
+def ensure_admin_account(default_password: str = "admin123") -> str:
+    """Return the admin username, creating the default account only if absent."""
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT username FROM users WHERE role='admin' ORDER BY id LIMIT 1").fetchone()
+        if row:
+            return row["username"]
+        if len(default_password) < 8:
+            default_password = "admin123"
+        conn.execute(
+            "INSERT INTO users(username,password_hash,role,full_name) VALUES(?,?,?,?)",
+            ("admin", hash_password(default_password), "admin", "System Administrator"),
+        )
+        conn.commit()
+        return "admin"
+    finally:
+        conn.close()
 
 def calculate_ctc(basic, da, hra, phonebill, others, esic_if_applicable, pf_basis="capped", is_pwd=False):
     b, d, h, p, o = [max(0.0, float(x or 0)) for x in (basic, da, hra, phonebill, others)]
@@ -351,8 +430,13 @@ def get_all_employees():
 
 
 def get_employee(employee_code: str):
-    conn = get_connection(); row = conn.execute("SELECT * FROM employees WHERE employee_code=?", (employee_code,)).fetchone(); conn.close()
-    return dict(row) if row else None
+    code = _normalize_employee_code(employee_code)
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT * FROM employees WHERE upper(trim(employee_code))=?", (code,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
 
 def employee_count():

@@ -77,13 +77,21 @@ def require_login(role="admin"):
                 st.error("Please enter both username and password.")
             else:
                 user=authenticate_user(username,password)
-                if user and user.get("role")==role:
-                    st.session_state.update(authenticated=True,username=user["username"],role=user["role"],employee_code=user.get("employee_code"),last_activity=time.time())
-                    st.rerun()
-                elif user:
+                if user is None:
+                    st.error("Invalid username or password. Check the credentials and try again.")
+                elif user.get("role") != role:
                     st.error("This account is not authorized for this portal.")
+                elif role == "employee" and not user.get("employee_code"):
+                    st.error("This employee account is not linked to an employee record. Contact HR/Admin.")
                 else:
-                    st.error("Invalid username or password.")
+                    st.session_state.update(
+                        authenticated=True,
+                        username=user["username"],
+                        role=user["role"],
+                        employee_code=user.get("employee_code"),
+                        last_activity=time.time(),
+                    )
+                    st.rerun()
     st.markdown('<div style="text-align:center;color:#64748b;font-size:.8rem;margin-top:12px">If you cannot sign in, contact HR/Admin to reset your portal password.</div></div>',unsafe_allow_html=True)
     st.stop()
 
