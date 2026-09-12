@@ -49,13 +49,30 @@ def inject_css():
 
         #MainMenu, header, footer {{ visibility: hidden; }}
 
-        /* Sidebar Styling */
+        /* ---------- Sidebar High Contrast Styling ---------- */
         section[data-testid="stSidebar"] {{
             background: linear-gradient(180deg, {PALETTE['navy']} 0%, {PALETTE['secondary_navy']} 100%);
             border-right: 1px solid rgba(255,255,255,0.08);
         }}
         section[data-testid="stSidebar"] * {{
-            color: #f1f5f9 !important;
+            color: #ffffff !important;
+        }}
+        
+        /* Force Sidebar Buttons to be Highly Visible */
+        section[data-testid="stSidebar"] .stButton > button {{
+            background-color: rgba(23, 182, 167, 0.15) !important;
+            border: 1px solid {PALETTE['teal']} !important;
+            color: #ffffff !important;
+            border-radius: 10px !important;
+            font-weight: 600 !important;
+            width: 100% !important;
+            transition: all 0.2s ease-in-out;
+        }}
+        section[data-testid="stSidebar"] .stButton > button:hover {{
+            background-color: {PALETTE['teal']} !important;
+            color: {PALETTE['navy']} !important;
+            border-color: {PALETTE['teal']} !important;
+            box-shadow: 0 4px 12px rgba(23, 182, 167, 0.3);
         }}
 
         /* Modern Enterprise Cards */
@@ -95,16 +112,16 @@ def inject_css():
         /* Badges & Pills */
         .hr-pill {{
             display: inline-block;
-            padding: 0.25rem 0.8rem;
+            padding: 0.3rem 0.9rem;
             border-radius: 30px;
             font-size: 0.7rem;
             font-weight: 700;
             letter-spacing: 0.5px;
             text-transform: uppercase;
         }}
-        .pill-active {{ background: #dcfce7; color: #166534; }}
-        .pill-pending {{ background: #fef9c3; color: #854d0e; }}
-        .pill-rejected {{ background: #fee2e2; color: #991b1b; }}
+        .pill-active {{ background: #dcfce7; color: #166534 !important; }}
+        .pill-pending {{ background: #fef9c3; color: #854d0e !important; }}
+        .pill-rejected {{ background: #fee2e2; color: #991b1b !important; }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -119,7 +136,7 @@ def render_sidebar_brand():
                 <div style="display:flex; align-items:center; gap:10px; margin-bottom:1rem;">
                     <img src="data:image/png;base64,{logo_b64}" style="height:38px; border-radius:6px; background:white; padding:2px;" />
                     <div>
-                        <div style="font-weight:700; font-size:0.95rem; line-height:1.2;">TEC TANIVA</div>
+                        <div style="font-weight:700; font-size:0.95rem; line-height:1.2; color:#ffffff;">TEC TANIVA</div>
                         <div style="font-size:0.65rem; color:#94a3b8 !important;">HRMS Portal</div>
                     </div>
                 </div>
@@ -147,7 +164,6 @@ def require_login(role="admin"):
                     background-repeat: no-repeat;
                     background-attachment: fixed;
                 }}
-                /* Custom Glassmorphism Card Container */
                 .clean-login-card {{
                     background: rgba(255, 255, 255, 0.95);
                     backdrop-filter: blur(12px);
@@ -157,7 +173,6 @@ def require_login(role="admin"):
                     border: 1px solid rgba(255, 255, 255, 0.9);
                     margin-top: 6vh;
                 }}
-                /* Completely Strip Streamlit's Default Form Box Background */
                 [data-testid="stForm"] {{
                     background-color: transparent !important;
                     border: none !important;
@@ -170,8 +185,6 @@ def require_login(role="admin"):
             )
 
         st.markdown("<div style='height: 4vh;'></div>", unsafe_allow_html=True)
-        
-        # Positioned neatly on the right side
         col_left, col_right = st.columns([1.25, 1.05])
         
         with col_right:
