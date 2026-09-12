@@ -265,13 +265,23 @@ def require_login(role="admin"):
             f"""
             <style>
             .stApp {{
-                background-image: linear-gradient(rgba(11, 28, 44, 0.15), rgba(11, 28, 44, 0.15)), url("data:image/png;base64,{bg_b64}");
+                background-image: linear-gradient(rgba(11, 28, 44, 0.25), rgba(11, 28, 44, 0.25)), url("data:image/png;base64,{bg_b64}");
                 background-size: cover; background-position: center; background-repeat: no-repeat; background-attachment: fixed;
             }}
+            /* Transparent / Glassmorphism Login Box */
             [data-testid="stForm"] {{
-                background: rgba(255,255,255,0.95) !important; backdrop-filter: blur(12px) !important;
-                border-radius: 20px !important; padding: 2rem !important; box-shadow: 0 15px 35px rgba(0,0,0,0.25) !important;
-                border: 1px solid rgba(255,255,255,0.9) !important;
+                background: rgba(255, 255, 255, 0.2) !important; 
+                backdrop-filter: blur(16px) !important;
+                -webkit-backdrop-filter: blur(16px) !important;
+                border-radius: 20px !important; 
+                padding: 2rem !important; 
+                box-shadow: 0 15px 35px rgba(0, 0, 0, 0.3) !important;
+                border: 1px solid rgba(255, 255, 255, 0.4) !important;
+            }}
+            /* Ensure text labels inside the transparent form stay crisp and readable */
+            [data-testid="stForm"] label div p {{
+                color: #0f172a !important;
+                font-weight: 600 !important;
             }}
             </style>
             """, unsafe_allow_html=True)
