@@ -13,70 +13,6 @@ from database import authenticate_user
 
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 
-SESSION_SECRET = os.environ.get("HRMS_SESSION_SECRET", "TEC_TANIVA_HRMS_PERSISTENT_KEY_2026")
-
-
-def _sign(payload: str) -> str:
-    return hmac.new(SESSION_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
-
-
-def _make_token(username, role, employee_code):
-    emp = str(employee_code or "")
-    payload = f"{username}:{role}:{emp}"
-    sig = _sign(payload)
-    data = f"{payload}:{sig}"
-    return base64.urlsafe_b64encode(data.encode()).decode()
-
-
-def _verify_token(token):
-    try:
-        data = base64.urlsafe_b64decode(token.encode()).decode()
-        parts = data.split(":")
-        if len(parts) != 4:
-            return None
-        username, role, emp, sig = parts
-        payload = f"{username}:{role}:{emp}"
-        expected_sig = _sign(payload)
-        if hmac.compare_digest(sig, expected_sig):
-            return {"username": username, "role": role, "employee_code": emp}
-    except Exception:
-        pass
-    return None
-
-
-def _get_query_param(key, default=None):
-    try:
-        if hasattr(st, "query_params"):
-            return st.query_params.get(key, default)
-        params = st.experimental_get_query_params()
-        vals = params.get(key, [])
-        return vals[0] if vals else default
-    except Exception:
-        return default
-
-
-def _set_query_param(key, value):
-    try:
-        if hasattr(st, "query_params"):
-            st.query_params[key] = value
-        else:
-            params = st.experimental_get_query_params()
-            params[key] = value
-            st.experimental_set_query_params(**params)
-    except Exception:
-        pass
-
-
-def _clear_query_params():
-    try:
-        if hasattr(st, "query_params"):
-            st.query_params.clear()
-        else:
-            st.experimental_set_query_params()
-    except Exception:
-        pass
-
-
 def get_base64_image(image_path):
     if os.path.exists(image_path):
         with open(image_path, "rb") as f:
@@ -242,64 +178,51 @@ def render_sidebar_brand():
 
 
 def require_login(role="admin"):
-    """Strict session-only authentication. No auth tokens are accepted from URLs."""
-    current_role = st.session_state.get("role")
-    authenticated = bool(st.session_state.get("authenticated"))
-
-    if authenticated and current_role == role:
+    """Render a login form and stop execution until the correct DB user is authenticated."""
+    if st.session_state.get("authenticated") and st.session_state.get("role") == role:
         return
-
-    if authenticated and current_role != role:
-        st.warning(f"You are already signed in as {current_role}. Please sign out before opening this portal.")
-        if st.button("Sign Out"):
-            st.session_state.clear()
-            st.rerun()
-        st.stop()
 
     bg_filename = "admin_bg.png" if role == "admin" else "employee_bg.png"
     bg_path = os.path.join(ASSETS_DIR, bg_filename)
     bg_b64 = get_base64_image(bg_path)
-
     if bg_b64:
-        st.markdown(
-            f"""
-            <style>
-            .stApp {{
-                background-image: linear-gradient(rgba(11, 28, 44, 0.15), rgba(11, 28, 44, 0.15)), url("data:image/png;base64,{bg_b64}");
-                background-size: cover; background-position: center; background-repeat: no-repeat; background-attachment: fixed;
-            }}
-            [data-testid="stForm"] {{
-                background: rgba(255,255,255,0.95) !important; backdrop-filter: blur(12px) !important;
-                border-radius: 20px !important; padding: 2rem !important; box-shadow: 0 15px 35px rgba(0,0,0,0.25) !important;
-                border: 1px solid rgba(255,255,255,0.9) !important;
-            }}
-            </style>
-            """, unsafe_allow_html=True)
+        st.markdown(f"""<style>
+        .stApp {{ background-image: linear-gradient(rgba(11,28,44,.12),rgba(11,28,44,.12)), url('data:image/png;base64,{bg_b64}'); background-size:cover; background-position:center; background-attachment:fixed; }}
+        [data-testid='stForm'] {{ background:rgba(255,255,255,.96)!important; border-radius:20px!important; padding:2rem!important; box-shadow:0 15px 35px rgba(0,0,0,.18)!important; }}
+        </style>""", unsafe_allow_html=True)
 
-    st.markdown("<div style='height: 8vh;'></div>", unsafe_allow_html=True)
-    _, col = st.columns([1.0, 1.25])
+    st.markdown("<div style='height:8vh'></div>", unsafe_allow_html=True)
+    _, col, _ = st.columns([1, 2, 1])
     with col:
         st.markdown(f"## {'Admin' if role == 'admin' else 'Employee'} Portal Login")
         st.caption("Enter your portal username and password.")
-        with st.form(f"login_form_{role}", clear_on_submit=False):
-            username = st.text_input("Username", placeholder="e.g. TT-EMP-0001", autocomplete="username")
+        with st.form(f"login_form_{role}"):
+            username = st.text_input("Username", placeholder="e.g. TT-EMP-0003", autocomplete="username")
             password = st.text_input("Password", type="password", placeholder="Enter password", autocomplete="current-password")
             submitted = st.form_submit_button("Sign In", use_container_width=True, type="primary")
             if submitted:
                 user = authenticate_user(username, password)
                 if user and user.get("role") == role:
-                    if role == "employee" and not user.get("employee_code"):
-                        st.error("This employee login is not linked to an employee record. Please contact HR/Admin.")
-                        st.stop()
+                    if role == "employee":
+                        code = (user.get("employee_code") or "").strip()
+                        if not code:
+                            st.error("This login is not linked to an employee record. Contact HR/Admin.")
+                            st.stop()
+                        # Verify the linked employee exists before creating a session.
+                        from database import get_employee
+                        if not get_employee(code):
+                            st.error(f"Employee record {code} was not found in the HRMS database. Contact HR/Admin.")
+                            st.stop()
+                        st.session_state["employee_code"] = code
+                    else:
+                        st.session_state["employee_code"] = None
                     st.session_state["authenticated"] = True
                     st.session_state["username"] = user["username"]
                     st.session_state["role"] = user["role"]
-                    st.session_state["employee_code"] = user.get("employee_code")
                     st.rerun()
                 else:
                     st.error("Invalid username or password.")
     st.stop()
-
 
 def logout_button():
     with st.sidebar:

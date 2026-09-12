@@ -10,31 +10,20 @@ import os
 import secrets
 import hmac
 from datetime import datetime
+import pandas as pd
 
 # ---------------------------------------------------------------------------
-# SINGLE SHARED DATABASE
+# SINGLE PROJECT DATABASE
 # ---------------------------------------------------------------------------
-# Both admin.py and employee_count.py must use the exact same database.
-# A shared per-user location prevents the common production problem where
-# Admin and Employee are launched from two copied project folders and silently
-# use two different SQLite files. HRMS_DB_PATH can override this location.
-LOCAL_DB_DIR = os.path.join(os.path.dirname(__file__), "database")
+# Admin and Employee are deliberately tied to the same database file inside
+# this project. Both Streamlit entry points import this module, so they use
+# exactly the same DB_PATH. HRMS_DB_PATH may override it for deployment.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOCAL_DB_DIR = os.path.join(BASE_DIR, "database")
 os.makedirs(LOCAL_DB_DIR, exist_ok=True)
 LOCAL_DB_PATH = os.path.join(LOCAL_DB_DIR, "hr_system.db")
-SHARED_DB_DIR = os.path.join(os.path.expanduser("~"), ".tec_taniva_hrms")
-os.makedirs(SHARED_DB_DIR, exist_ok=True)
-SHARED_DB_PATH = os.path.join(SHARED_DB_DIR, "hr_system.db")
-DB_PATH = os.environ.get("HRMS_DB_PATH", SHARED_DB_PATH)
-
-# On first migration, preserve an existing project database instead of
-# starting with an empty shared database. This runs only when the shared DB
-# does not exist yet.
-if not os.path.exists(DB_PATH) and DB_PATH == SHARED_DB_PATH and os.path.exists(LOCAL_DB_PATH):
-    try:
-        import shutil
-        shutil.copy2(LOCAL_DB_PATH, DB_PATH)
-    except OSError:
-        pass
+DB_PATH = os.path.abspath(os.environ.get("HRMS_DB_PATH", LOCAL_DB_PATH))
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # STATUTORY CONSTANTS (India - PF & ESI, FY 2026)
@@ -115,6 +104,95 @@ def _ensure_column(cur, table, column, coltype_and_default):
     if column not in existing:
         cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype_and_default}")
 
+
+def _safe_float(value, default=0.0):
+    try:
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+def _import_employees_from_excel(conn):
+    """Import bundled data.xlsx only when the DB has no employees.
+    Existing DB data is never overwritten.
+    """
+    count = conn.execute("SELECT COUNT(*) FROM employees").fetchone()[0]
+    if count:
+        return 0
+    xlsx = os.path.join(BASE_DIR, "data.xlsx")
+    if not os.path.exists(xlsx):
+        return 0
+    try:
+        import pandas as pd
+        df = pd.read_excel(xlsx)
+    except Exception:
+        return 0
+    if "employee_code" not in df.columns or "employee_name" not in df.columns:
+        return 0
+    allowed = {
+        "employee_code","employee_name","dob","highest_qualification","date_of_joining",
+        "designation","reporting_boss","mobile_number","uan_number","esic_number",
+        "employee_type","emergency_contact_number","email","place","basic_pay","da",
+        "hra","phonebill_pay","others","pf_basis","pf_wage","pf","employer_pf",
+        "employer_eps","employer_edli","employer_admin_charges","employer_pf_total",
+        "is_pwd","esic_if_applicable","esic_wage_ceiling_used","esic_eligible_by_wage",
+        "employer_esic","employee_esic","food_reimbursement","ctc","leave_balance","status"
+    }
+    inserted=0
+    for _, r in df.iterrows():
+        code=str(r.get("employee_code", "")).strip()
+        name=str(r.get("employee_name", "")).strip()
+        if not code or not name or code.lower()=="nan":
+            continue
+        data={k:r.get(k) for k in allowed if k in df.columns}
+        for k,v in list(data.items()):
+            if pd.isna(v): data[k]=None
+        # Calculate missing statutory values from the employee's pay fields.
+        _, calc=calculate_ctc(data.get("basic_pay",0),data.get("da",0),data.get("hra",0),
+                           data.get("phonebill_pay",0),data.get("others",0),
+                           data.get("esic_if_applicable") or "No",data.get("pf_basis") or "capped",
+                           bool(data.get("is_pwd") or 0))
+        mapping={"pf_wage":"pf_wage","pf":"employee_pf","employer_pf":"employer_epf","employer_eps":"employer_eps",
+                 "employer_edli":"employer_edli","employer_admin_charges":"employer_admin_charges",
+                 "employer_pf_total":"employer_pf_total","esic_wage_ceiling_used":"esi_ceiling",
+                 "esic_eligible_by_wage":"esic_eligible","employer_esic":"employer_esic","employee_esic":"employee_esic"}
+        for dest,src in mapping.items():
+            if dest not in data or data[dest] is None: data[dest]=calc[src]
+        data.setdefault("status","Active"); data.setdefault("leave_balance",12)
+        # SQLite-friendly date values.
+        for dk in ("dob", "date_of_joining"):
+            if dk in data and data[dk] is not None:
+                data[dk]=str(data[dk])[:10]
+        cols=list(data.keys()); vals=[data[c] for c in cols]
+        placeholders=",".join("?" for _ in cols)
+        try:
+            conn.execute(f"INSERT INTO employees ({','.join(cols)}) VALUES ({placeholders})",vals)
+            inserted+=1
+        except sqlite3.IntegrityError:
+            pass
+    conn.commit()
+    return inserted
+
+def _ensure_employee_logins(conn, default_password="Welcome@123"):
+    """Create a login for every employee that has no employee-role login.
+    Never changes an existing employee password.
+    """
+    rows=conn.execute("SELECT employee_code, employee_name FROM employees").fetchall()
+    created=0
+    for r in rows:
+        code=(r["employee_code"] or "").strip()
+        if not code: continue
+        exists=conn.execute("SELECT id FROM users WHERE lower(trim(employee_code))=lower(?) AND role='employee' LIMIT 1",(code,)).fetchone()
+        if exists: continue
+        uname=_normalize_username(code)
+        taken=conn.execute("SELECT id FROM users WHERE username=? LIMIT 1",(uname,)).fetchone()
+        if taken: continue
+        conn.execute("INSERT INTO users(username,password_hash,role,employee_code,full_name) VALUES(?,?,?,?,?)",
+                     (uname,hash_password(default_password),"employee",code,r["employee_name"]))
+        created+=1
+    conn.commit()
+    return created
 
 def init_db():
     conn = get_connection()
@@ -256,6 +334,10 @@ def init_db():
             (_normalize_username("admin"), hash_password("admin123"), "admin", "HR Administrator"),
         )
         conn.commit()
+
+    # First-run bootstrap: load the bundled spreadsheet if this database is empty.
+    _import_employees_from_excel(conn)
+    _ensure_employee_logins(conn)
 
     conn.close()
 
