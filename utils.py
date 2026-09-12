@@ -183,6 +183,22 @@ def inject_css():
         .pill-active {{ background: #dcfce7; color: #166534 !important; }}
         .pill-pending {{ background: #fef9c3; color: #854d0e !important; }}
         .pill-rejected {{ background: #fee2e2; color: #991b1b !important; }}
+
+        /* ---------- Date Picker & Popover Visibility Fix ---------- */
+        div[data-baseweb="popover"] *, div[data-baseweb="calendar"] * {{
+            color: #0f172a !important;
+        }}
+        div[data-baseweb="calendar"] button {{
+            color: #0f172a !important;
+            background-color: transparent !important;
+        }}
+        div[data-baseweb="calendar"] button:hover {{
+            background-color: #f1f5f9 !important;
+        }}
+        div[data-baseweb="calendar"] [aria-selected="true"] {{
+            background-color: {PALETTE['teal']} !important;
+            color: #ffffff !important;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -209,7 +225,6 @@ def render_sidebar_brand():
         st.markdown("---")
 
 def require_login(role="admin"):
-    # Restore session automatically from persistent URL token on browser refresh
     if not st.session_state.get("authenticated"):
         auth_token = _get_query_param("auth")
         if auth_token:
@@ -236,7 +251,6 @@ def require_login(role="admin"):
                     background-repeat: no-repeat;
                     background-attachment: fixed;
                 }}
-                /* Completely remove Streamlit form background box, borders, and extra padding */
                 [data-testid="stForm"] {{
                     background: rgba(255, 255, 255, 0.95) !important;
                     backdrop-filter: blur(12px) !important;
