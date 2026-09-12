@@ -14,6 +14,7 @@ from database import (
     get_all_employees, employee_count, next_employee_code, calculate_ctc,
     create_user, username_exists, get_leave_requests, decide_leave,
     get_all_employee_names, add_announcement, get_announcements,
+    get_statutory_summary,
 )
 from utils import (
     inject_css, render_sidebar_brand, require_login,
@@ -76,8 +77,9 @@ with c4: metric_card("Total Monthly CTC", f"₹ {total_ctc:,.0f}")
 
 st.write("")
 
-tab_add, tab_directory, tab_leaves, tab_access, tab_announce = st.tabs(
-    ["➕ Onboard Employee", "📇 Employee Directory", "🗓️ Leave Approvals", "🔐 Portal Access", "📢 Announcements"]
+tab_add, tab_directory, tab_statutory, tab_leaves, tab_access, tab_announce = st.tabs(
+    ["➕ Onboard Employee", "📇 Employee Directory", "🧮 Statutory Summary",
+     "🗓️ Leave Approvals", "🔐 Portal Access", "📢 Announcements"]
 )
 
 with tab_add:
@@ -121,22 +123,38 @@ with tab_add:
 
         st.markdown("---")
         st.subheader("Salary Structure & Statutory Contributions / Deductions")
-        s1, s2, s3, s4 = st.columns(4)
+        s1, s2, s3, s4, s5 = st.columns(5)
         with s1: basic_pay = st.number_input("Basic Pay (₹)", min_value=0.0, value=float(emp.get("basic_pay", 30000.0) or 30000.0), step=500.0)
-        with s2: hra = st.number_input("HRA (₹)", min_value=0.0, value=float(emp.get("hra", 5000.0) or 5000.0), step=500.0)
-        with s3: phonebill_pay = st.number_input("Phone Bill (₹)", min_value=0.0, value=float(emp.get("phonebill_pay", 2000.0) or 2000.0), step=100.0)
-        with s4: others = st.number_input("Others (₹)", min_value=0.0, value=float(emp.get("others", 20000.0) or 20000.0), step=500.0)
+        with s2: da = st.number_input("Dearness Allowance / DA (₹)", min_value=0.0, value=float(emp.get("da", 0.0) or 0.0), step=500.0, help="Basic + DA together form the statutory 'PF Wage'.")
+        with s3: hra = st.number_input("HRA (₹)", min_value=0.0, value=float(emp.get("hra", 5000.0) or 5000.0), step=500.0)
+        with s4: phonebill_pay = st.number_input("Phone Bill (₹)", min_value=0.0, value=float(emp.get("phonebill_pay", 2000.0) or 2000.0), step=100.0)
+        with s5: others = st.number_input("Others (₹)", min_value=0.0, value=float(emp.get("others", 20000.0) or 20000.0), step=500.0)
 
-        s6, s7 = st.columns(2)
-        with s6: esic_if_applicable = st.selectbox("ESIC Applicable?", ["No", "Yes"], index=1 if emp.get("esic_if_applicable") == "Yes" else 0)
-        with s7: food_reimbursement = st.selectbox("Food Reimbursement?", ["No", "Yes"], index=1 if emp.get("food_reimbursement") == "Yes" else 0)
+        s6, s7, s8 = st.columns(3)
+        with s6:
+            pf_basis_label = st.selectbox(
+                "PF Contribution Basis",
+                ["Statutory Ceiling (₹15,000 cap)", "Actual / Full Basis+DA (voluntary higher PF)"],
+                index=0 if emp.get("pf_basis", "capped") == "capped" else 1,
+                help="Statutory default caps PF wage at ₹15,000. 'Actual' is a joint employer-employee election to contribute 12% on the full Basic+DA — EPS still stays capped at ₹1,250.",
+            )
+            pf_basis = "capped" if pf_basis_label.startswith("Statutory") else "actual"
+        with s7:
+            esic_if_applicable = st.selectbox("ESIC Applicable?", ["No", "Yes"], index=1 if emp.get("esic_if_applicable") == "Yes" else 0)
+        with s8:
+            food_reimbursement = st.selectbox("Food Reimbursement?", ["No", "Yes"], index=1 if emp.get("food_reimbursement") == "Yes" else 0)
+
+        is_pwd = st.checkbox(
+            "Employee is a Person with Disability (raises ESIC wage ceiling to ₹25,000)",
+            value=bool(emp.get("is_pwd", 0)),
+        )
 
         # Live statutory calculation (recomputes on every widget interaction)
-        live_ctc, bd = calculate_ctc(basic_pay, hra, phonebill_pay, others, esic_if_applicable)
+        live_ctc, bd = calculate_ctc(basic_pay, da, hra, phonebill_pay, others, esic_if_applicable, pf_basis, is_pwd)
 
         st.markdown("###### Suggested statutory deductions (editable below)")
-        s5, = st.columns(1)
-        with s5:
+        pf_col, = st.columns(1)
+        with pf_col:
             pf = st.number_input(
                 "Employee PF Deduction (₹)",
                 min_value=0.0,
@@ -147,20 +165,24 @@ with tab_add:
 
         esic_note = ""
         if esic_if_applicable == "Yes" and not bd["esic_eligible"]:
-            esic_note = f" ⚠️ Gross wage ₹{bd['gross']:,.0f} exceeds the ESI wage ceiling (₹21,000) — ESIC will NOT be applied."
+            esic_note = f" ⚠️ Gross wage ₹{bd['gross']:,.0f} exceeds the ESI wage ceiling (₹{bd['esi_ceiling']:,.0f}) — ESIC will NOT be applied."
+
+        basis_note = "Actual/uncapped Basic+DA (voluntary higher PF)" if bd["pf_basis"] == "actual" else "Capped at ₹15,000 statutory ceiling"
 
         st.markdown(
             f"""
             <div class="hr-metric" style="margin-top:8px; text-align:left;">
                 <div class="label">STATUTORY BREAKDOWN</div>
                 <table style="width:100%; color:#e2e8f0; font-size:0.85rem; margin-top:8px; border-collapse:collapse;">
-                    <tr><td>Gross (Basic + HRA + Phone + Others)</td><td style="text-align:right;">₹ {bd['gross']:,.2f}</td></tr>
-                    <tr><td>PF Wage (Basic, capped at ₹15,000)</td><td style="text-align:right;">₹ {bd['pf_wage']:,.2f}</td></tr>
-                    <tr><td>Employer EPF (3.67%)</td><td style="text-align:right;">₹ {bd['employer_epf']:,.2f}</td></tr>
+                    <tr><td>Gross (Basic + DA + HRA + Phone + Others)</td><td style="text-align:right;">₹ {bd['gross']:,.2f}</td></tr>
+                    <tr><td>PF Wage Base (Basic + DA)</td><td style="text-align:right;">₹ {bd['pf_wage_base']:,.2f}</td></tr>
+                    <tr><td>PF Wage Used ({basis_note})</td><td style="text-align:right;">₹ {bd['pf_wage']:,.2f}</td></tr>
+                    <tr><td>Employer EPF (12% total − EPS)</td><td style="text-align:right;">₹ {bd['employer_epf']:,.2f}</td></tr>
                     <tr><td>Employer EPS (8.33%, capped ₹1,250)</td><td style="text-align:right;">₹ {bd['employer_eps']:,.2f}</td></tr>
-                    <tr><td>Employer EDLI (0.5%)</td><td style="text-align:right;">₹ {bd['employer_edli']:,.2f}</td></tr>
+                    <tr><td>Employer EDLI (0.5%, capped ₹75)</td><td style="text-align:right;">₹ {bd['employer_edli']:,.2f}</td></tr>
                     <tr><td>EPFO Admin Charges (0.5%)</td><td style="text-align:right;">₹ {bd['employer_admin_charges']:,.2f}</td></tr>
                     <tr><td><b>Employer PF Total</b></td><td style="text-align:right;"><b>₹ {bd['employer_pf_total']:,.2f}</b></td></tr>
+                    <tr><td>ESIC Wage Ceiling Used</td><td style="text-align:right;">₹ {bd['esi_ceiling']:,.0f}</td></tr>
                     <tr><td>Employer ESIC (3.25%){' — eligible' if bd['esic_eligible'] else ' — not applied'}</td><td style="text-align:right;">₹ {bd['employer_esic']:,.2f}</td></tr>
                     <tr><td>Employee ESIC (0.75%){' — eligible' if bd['esic_eligible'] else ' — not applied'}</td><td style="text-align:right;">₹ {bd['employee_esic']:,.2f}</td></tr>
                 </table>
@@ -170,6 +192,11 @@ with tab_add:
             </div>
             """,
             unsafe_allow_html=True,
+        )
+        st.caption(
+            "Note: EPFO admin charges are shown per-employee for CTC estimation. In actual EPFO remittance "
+            "these are reconciled at the establishment level with a ₹500/month minimum (₹75 if there are no "
+            "contributing members that month) — see the Statutory Summary tab for the company-wide total."
         )
 
         st.markdown("---")
@@ -217,9 +244,11 @@ with tab_add:
                     "emergency_contact_number": emergency_contact_number,
                     "place": place,
                     "basic_pay": basic_pay,
+                    "da": da,
                     "hra": hra,
                     "phonebill_pay": phonebill_pay,
                     "others": others,
+                    "pf_basis": pf_basis,
                     "pf_wage": bd["pf_wage"],
                     "pf": pf,
                     "employer_pf": bd["employer_epf"],
@@ -227,7 +256,9 @@ with tab_add:
                     "employer_edli": bd["employer_edli"],
                     "employer_admin_charges": bd["employer_admin_charges"],
                     "employer_pf_total": bd["employer_pf_total"],
+                    "is_pwd": 1 if is_pwd else 0,
                     "esic_if_applicable": esic_if_applicable,
+                    "esic_wage_ceiling_used": bd["esi_ceiling"],
                     "esic_eligible_by_wage": 1 if bd["esic_eligible"] else 0,
                     "employer_esic": bd["employer_esic"],
                     "employee_esic": bd["employee_esic"],
@@ -295,6 +326,36 @@ with tab_directory:
             "employee_master_directory.csv",
             "text/csv",
             use_container_width=True
+        )
+
+with tab_statutory:
+    st.subheader("Company-Wide Statutory Contribution Summary")
+    st.caption(
+        "Aggregate employer-side PF & ESI outgo across all Active employees, for payroll planning and "
+        "cross-checking against EPFO/ESIC challans. Figures are estimates built from each employee's "
+        "individual record."
+    )
+    summary = get_statutory_summary()
+    if not summary or not summary.get("employee_count"):
+        st.info("No active employees yet — statutory totals will appear here once employees are onboarded.")
+    else:
+        g1, g2, g3, g4 = st.columns(4)
+        with g1: metric_card("Employer EPF Total", f"₹ {summary['total_employer_epf']:,.0f}")
+        with g2: metric_card("Employer EPS Total", f"₹ {summary['total_employer_eps']:,.0f}")
+        with g3: metric_card("Employer EDLI Total", f"₹ {summary['total_employer_edli']:,.0f}")
+        with g4: metric_card("Employer Admin Charges", f"₹ {summary['total_admin_charges']:,.0f}")
+
+        st.write("")
+        h1, h2, h3 = st.columns(3)
+        with h1: metric_card("Total Employer PF Outgo", f"₹ {summary['total_employer_pf']:,.0f}")
+        with h2: metric_card("Total Employer ESIC", f"₹ {summary['total_employer_esic']:,.0f}")
+        with h3: metric_card("Total Employee PF + ESIC (deductions)", f"₹ {summary['total_employee_pf'] + summary['total_employee_esic']:,.0f}")
+
+        st.info(
+            f"Across **{summary['employee_count']}** active employees. Remember: EPFO admin charges have a "
+            "real-world establishment-level minimum of ₹500/month (₹75 if no contributing members that "
+            "month) — if your per-employee sum above is lower than that floor, your actual EPFO remittance "
+            "for admin charges will be the ₹500 minimum, not the summed estimate."
         )
 
 with tab_leaves:

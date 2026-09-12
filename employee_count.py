@@ -92,17 +92,18 @@ with tab_profile:
 with tab_payslip:
     st.subheader("Salary & Compensation Summary")
     st.markdown('<div class="hr-card">', unsafe_allow_html=True)
-    s1, s2, s3, s4 = st.columns(4)
+    s1, s2, s3, s4, s5 = st.columns(5)
     s1.metric("Basic Pay", f"₹{emp.get('basic_pay', 0):,.0f}")
-    s2.metric("HRA", f"₹{emp.get('hra', 0):,.0f}")
-    s3.metric("Phone Bill", f"₹{emp.get('phonebill_pay', 0):,.0f}")
-    s4.metric("Others", f"₹{emp.get('others', 0):,.0f}")
+    s2.metric("DA", f"₹{emp.get('da', 0):,.0f}")
+    s3.metric("HRA", f"₹{emp.get('hra', 0):,.0f}")
+    s4.metric("Phone Bill", f"₹{emp.get('phonebill_pay', 0):,.0f}")
+    s5.metric("Others", f"₹{emp.get('others', 0):,.0f}")
 
     st.markdown("---")
     st.markdown("##### Deductions (from your gross pay)")
+    esic_applicable = emp.get("esic_if_applicable", "No") == "Yes" and emp.get("esic_eligible_by_wage")
     d1, d2 = st.columns(2)
     d1.metric("Employee PF", f"₹{emp.get('pf', 0):,.0f}")
-    esic_applicable = emp.get("esic_if_applicable", "No") == "Yes" and emp.get("esic_eligible_by_wage")
     d2.metric("Employee ESIC (0.75%)", f"₹{emp.get('employee_esic', 0):,.0f}" if esic_applicable else "Not Applicable")
 
     st.markdown("---")
@@ -111,6 +112,12 @@ with tab_payslip:
     e1.metric("Employer PF (EPF+EPS+EDLI+Admin)", f"₹{emp.get('employer_pf_total', 0):,.0f}")
     e2.metric("Employer ESIC (3.25%)", f"₹{emp.get('employer_esic', 0):,.0f}" if esic_applicable else "Not Applicable")
     e3.metric("ESIC Status", "Eligible" if esic_applicable else "Not Applicable")
+
+    pf_basis = emp.get("pf_basis") or "capped"
+    pf_basis_display = "Actual / Full Basic+DA (voluntary higher PF)" if pf_basis == "actual" else "Statutory Ceiling (₹15,000 cap)"
+    esic_ceiling_display = f"₹{emp.get('esic_wage_ceiling_used', 21000):,.0f}" + (" (PwD ceiling)" if emp.get("is_pwd") else "")
+
+    st.caption(f"PF Contribution Basis: **{pf_basis_display}** &nbsp;·&nbsp; ESIC Wage Ceiling Applied: **{esic_ceiling_display}**")
 
     st.markdown("---")
     note = " (includes statutory ESIC employer contribution)" if esic_applicable else ""
@@ -124,9 +131,9 @@ with tab_payslip:
         unsafe_allow_html=True,
     )
     st.caption(
-        "CTC = Basic + HRA + Phone Bill + Others + Employer PF (EPF 3.67% + EPS 8.33%, capped ₹1,250 "
-        "+ EDLI 0.5% + Admin Charges 0.5%, all on PF wage capped at ₹15,000) + Employer ESIC (3.25% of "
-        "gross, only if gross ≤ ₹21,000 and ESIC is marked applicable)."
+        "CTC = Basic + DA + HRA + Phone Bill + Others + Employer PF (EPF + EPS, capped ₹1,250 + EDLI, "
+        "capped ₹75 + Admin Charges 0.5%, all on the PF Wage per your contribution basis) + Employer ESIC "
+        "(3.25% of gross, only if gross is within the ESIC wage ceiling and ESIC is marked applicable)."
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
