@@ -14,7 +14,7 @@ from database import (
     get_all_employees, employee_count, next_employee_code, calculate_ctc,
     create_user, username_exists, get_leave_requests, decide_leave,
     get_all_employee_names, add_announcement, get_announcements,
-    get_statutory_summary,
+    get_statutory_summary, get_user_by_employee_code, reset_employee_password,
 )
 from utils import (
     inject_css, render_sidebar_brand, require_login,
@@ -369,26 +369,88 @@ with tab_leaves:
             st.markdown("</div>", unsafe_allow_html=True)
 
 with tab_access:
-    st.subheader("Create Employee Portal Login Account")
+    st.subheader("Employee Portal Login Access")
     if not employees:
         st.info("Add employees first before generating portal login credentials.")
     else:
         names = get_all_employee_names()
         opt = {f"{n['employee_name']} ({n['employee_code']})": n["employee_code"] for n in names}
-        with st.form("access_form"):
-            pick2 = st.selectbox("Employee", list(opt.keys()))
-            new_username = st.text_input("Username", value=opt[pick2] if pick2 else "")
-            new_password = st.text_input("Temporary Password", type="password", value="Welcome@123")
-            create = st.form_submit_button("Generate Login Credentials", use_container_width=True)
-            if create:
-                if username_exists(new_username):
-                    st.error("Username already taken.")
-                else:
-                    success = create_user(new_username, new_password, "employee", opt[pick2])
-                    if success:
-                        st.success(f"Login profile generated successfully for {pick2}.")
+        pick2 = st.selectbox("Employee", list(opt.keys()), key="access_emp_pick")
+        sel_emp_code = opt[pick2]
+
+        # Clear any previously displayed credentials when the admin switches
+        # to a different employee, so old creds aren't mistaken for new ones.
+        if st.session_state.get("last_access_emp_code") != sel_emp_code:
+            st.session_state["last_access_emp_code"] = sel_emp_code
+            st.session_state.pop("last_generated_creds", None)
+
+        existing_user = get_user_by_employee_code(sel_emp_code)
+
+        st.markdown('<div class="hr-card">', unsafe_allow_html=True)
+
+        if existing_user:
+            st.success(f"This employee already has a portal login: **{existing_user['username']}**")
+            st.caption(
+                "If they can't sign in, reset the password below rather than trying to create a "
+                "second account — the login is tied one-to-one with this employee code."
+            )
+            with st.form("reset_access_form"):
+                reset_password = st.text_input(
+                    "New Password",
+                    value="Welcome@123",
+                    help="Shown in plain text on purpose — this is a temporary password you'll read out or copy to the employee, not a secret of yours.",
+                )
+                do_reset = st.form_submit_button("Reset Password", use_container_width=True)
+                if do_reset:
+                    pwd = reset_password.strip()
+                    if len(pwd) < 4:
+                        st.error("Password should be at least 4 characters.")
                     else:
-                        st.error("Failed to create user login account.")
+                        uname = reset_employee_password(sel_emp_code, pwd)
+                        if uname:
+                            st.session_state["last_generated_creds"] = {"username": uname, "password": pwd}
+                            st.success("Password reset successfully.")
+                            st.rerun()
+                        else:
+                            st.error("Could not reset password — no login found for this employee.")
+        else:
+            with st.form("access_form"):
+                new_username = st.text_input("Username", value=sel_emp_code)
+                new_password = st.text_input(
+                    "Temporary Password",
+                    value="Welcome@123",
+                    help="Shown in plain text on purpose — this is a temporary password you'll read out or copy to the employee, not a secret of yours.",
+                )
+                create = st.form_submit_button("Generate Login Credentials", use_container_width=True)
+                if create:
+                    uname = new_username.strip()
+                    pwd = new_password.strip()
+                    if not uname:
+                        st.error("Username is required.")
+                    elif not pwd:
+                        st.error("Password is required.")
+                    elif username_exists(uname):
+                        st.error("That username is already taken by another account — pick a different one.")
+                    else:
+                        success = create_user(uname, pwd, "employee", sel_emp_code)
+                        if success:
+                            st.session_state["last_generated_creds"] = {"username": uname, "password": pwd}
+                            st.success(f"Login created for {pick2}.")
+                            st.rerun()
+                        else:
+                            st.error("Failed to create user login account.")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        creds = st.session_state.get("last_generated_creds")
+        if creds:
+            st.markdown("##### Credentials to share with the employee")
+            st.code(f"Username: {creds['username']}\nPassword: {creds['password']}", language=None)
+            st.caption(
+                "Copy these exactly — logins are matched without case-sensitivity and with "
+                "whitespace trimmed, but it's still best to hand over the exact text above. "
+                "This box clears when you pick a different employee."
+            )
 
 with tab_announce:
     st.subheader("Publish Company Announcements")
