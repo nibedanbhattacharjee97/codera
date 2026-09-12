@@ -184,20 +184,25 @@ def inject_css():
         .pill-pending {{ background: #fef9c3; color: #854d0e !important; }}
         .pill-rejected {{ background: #fee2e2; color: #991b1b !important; }}
 
-        /* ---------- Date Picker & Popover Visibility Fix ---------- */
-        div[data-baseweb="popover"] *, div[data-baseweb="calendar"] * {{
+        /* ---------- Date Picker & Calendar Popup Visibility Fix ---------- */
+        div[data-baseweb="popover"], div[data-baseweb="calendar"] {{
+            background-color: #ffffff !important;
             color: #0f172a !important;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.15) !important;
+            border-radius: 12px !important;
         }}
-        div[data-baseweb="calendar"] button {{
+        div[data-baseweb="calendar"] div, div[data-baseweb="calendar"] span, div[data-baseweb="calendar"] button {{
             color: #0f172a !important;
-            background-color: transparent !important;
+            -webkit-text-fill-color: #0f172a !important;
         }}
         div[data-baseweb="calendar"] button:hover {{
             background-color: #f1f5f9 !important;
+            color: #0f172a !important;
         }}
         div[data-baseweb="calendar"] [aria-selected="true"] {{
             background-color: {PALETTE['teal']} !important;
             color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
         }}
         </style>
         """,
