@@ -403,8 +403,8 @@ with tab_access:
                 do_reset = st.form_submit_button("Reset Password", use_container_width=True)
                 if do_reset:
                     pwd = reset_password.strip()
-                    if len(pwd) < 4:
-                        st.error("Password should be at least 4 characters.")
+                    if len(pwd) < 8:
+                        st.error("Password should be at least 8 characters.")
                     else:
                         uname = reset_employee_password(sel_emp_code, pwd)
                         if uname:

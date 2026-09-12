@@ -1,344 +1,104 @@
-"""
-utils.py
-UI helpers, CSS injections, background theme wrappers, and session guard rails
-for TEC TANIVA HRMS.
-"""
-
+"""UI, authentication and styling helpers for TEC TANIVA HRMS."""
+from __future__ import annotations
+import base64, os, time
 import streamlit as st
-import base64
-import os
-import hmac
-import hashlib
 from database import authenticate_user
 
-ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+SESSION_TIMEOUT_SECONDS = int(os.getenv("HRMS_SESSION_TIMEOUT", "28800"))
 
-SESSION_SECRET = os.environ.get("HRMS_SESSION_SECRET", "TEC_TANIVA_HRMS_PERSISTENT_KEY_2026")
-
-
-def _sign(payload: str) -> str:
-    return hmac.new(SESSION_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
+PALETTE={"navy":"#0b1c2c","secondary_navy":"#122a40","teal":"#17b6a7","teal_dark":"#0f8f83","orange":"#f5a623","bg":"#f8fafc","card":"#ffffff","text":"#0f172a","muted":"#64748b"}
 
 
-def _make_token(username, role, employee_code):
-    emp = str(employee_code or "")
-    payload = f"{username}:{role}:{emp}"
-    sig = _sign(payload)
-    data = f"{payload}:{sig}"
-    return base64.urlsafe_b64encode(data.encode()).decode()
-
-
-def _verify_token(token):
+def get_base64_image(path):
     try:
-        data = base64.urlsafe_b64decode(token.encode()).decode()
-        parts = data.split(":")
-        if len(parts) != 4:
-            return None
-        username, role, emp, sig = parts
-        payload = f"{username}:{role}:{emp}"
-        expected_sig = _sign(payload)
-        if hmac.compare_digest(sig, expected_sig):
-            return {"username": username, "role": role, "employee_code": emp}
-    except Exception:
-        pass
-    return None
+        with open(path,"rb") as f: return base64.b64encode(f.read()).decode()
+    except (OSError,TypeError): return ""
 
 
-def _get_query_param(key, default=None):
-    try:
-        if hasattr(st, "query_params"):
-            return st.query_params.get(key, default)
-        params = st.experimental_get_query_params()
-        vals = params.get(key, [])
-        return vals[0] if vals else default
-    except Exception:
-        return default
-
-
-def _set_query_param(key, value):
-    try:
-        if hasattr(st, "query_params"):
-            st.query_params[key] = value
-        else:
-            params = st.experimental_get_query_params()
-            params[key] = value
-            st.experimental_set_query_params(**params)
-    except Exception:
-        pass
-
-
-def _clear_query_params():
-    try:
-        if hasattr(st, "query_params"):
-            st.query_params.clear()
-        else:
-            st.experimental_set_query_params()
-    except Exception:
-        pass
-
-
-def get_base64_image(image_path):
-    if os.path.exists(image_path):
-        with open(image_path, "rb") as f:
-            return base64.b64encode(f.read()).decode()
-    return ""
-
-
-def logo_base64():
-    return get_base64_image(os.path.join(ASSETS_DIR, "logo.png"))
-
-
-PALETTE = {
-    "navy": "#0b1c2c",
-    "secondary_navy": "#122a40",
-    "teal": "#17b6a7",
-    "teal_dark": "#0f8f83",
-    "orange": "#f5a623",
-    "bg": "#f8fafc",
-    "card": "#ffffff",
-    "text": "#0f172a",
-    "muted": "#64748b",
-}
+def logo_base64(): return get_base64_image(os.path.join(ASSETS_DIR,"logo.png"))
 
 
 def inject_css():
-    st.markdown(
-        f"""
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
-
-        html, body, [class*="css"] {{
-            font-family: 'Plus Jakarta Sans', sans-serif;
-            color: {PALETTE['text']};
-        }}
-
-        .stApp {{
-            background-color: {PALETTE['bg']};
-        }}
-
-        #MainMenu, header, footer {{ visibility: hidden; }}
-
-        section[data-testid="stSidebar"] {{
-            background: linear-gradient(180deg, {PALETTE['navy']} 0%, {PALETTE['secondary_navy']} 100%);
-            border-right: 1px solid rgba(255,255,255,0.08);
-        }}
-        section[data-testid="stSidebar"] * {{
-            color: #ffffff !important;
-        }}
-
-        section[data-testid="stSidebar"] .stButton > button {{
-            background-color: rgba(23, 182, 167, 0.15) !important;
-            border: 1px solid {PALETTE['teal']} !important;
-            color: #ffffff !important;
-            border-radius: 10px !important;
-            font-weight: 600 !important;
-            width: 100% !important;
-            transition: all 0.2s ease-in-out;
-        }}
-        section[data-testid="stSidebar"] .stButton > button:hover {{
-            background-color: {PALETTE['teal']} !important;
-            color: {PALETTE['navy']} !important;
-            border-color: {PALETTE['teal']} !important;
-            box-shadow: 0 4px 12px rgba(23, 182, 167, 0.3);
-        }}
-
-        .hr-card {{
-            background: {PALETTE['card']};
-            border-radius: 16px;
-            padding: 1.5rem 1.8rem;
-            box-shadow: 0 4px 20px -2px rgba(11, 28, 44, 0.05);
-            border: 1px solid #e2e8f0;
-            margin-bottom: 1.2rem;
-        }}
-
-        .hr-metric {{
-            background: linear-gradient(135deg, {PALETTE['navy']}, {PALETTE['secondary_navy']});
-            color: white;
-            border-radius: 16px;
-            padding: 1.4rem;
-            box-shadow: 0 10px 25px -5px rgba(11,28,44,0.15);
-            border: 1px solid rgba(255,255,255,0.1);
-            text-align: center;
-        }}
-        .hr-metric .label {{
-            font-size: 0.75rem;
-            color: #94a3b8;
-            text-transform: uppercase;
-            letter-spacing: 0.8px;
-            font-weight: 600;
-        }}
-        .hr-metric .value {{
-            font-size: 1.8rem;
-            font-weight: 700;
-            color: {PALETTE['teal']};
-            margin-top: 0.3rem;
-        }}
-
-        .hr-pill {{
-            display: inline-block;
-            padding: 0.3rem 0.9rem;
-            border-radius: 30px;
-            font-size: 0.7rem;
-            font-weight: 700;
-            letter-spacing: 0.5px;
-            text-transform: uppercase;
-        }}
-        .pill-active {{ background: #dcfce7; color: #166534 !important; }}
-        .pill-pending {{ background: #fef9c3; color: #854d0e !important; }}
-        .pill-rejected {{ background: #fee2e2; color: #991b1b !important; }}
-
-        div[data-baseweb="popover"], div[data-baseweb="calendar"] {{
-            background-color: #ffffff !important;
-            color: #0f172a !important;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.15) !important;
-            border-radius: 12px !important;
-        }}
-        div[data-baseweb="calendar"] div, div[data-baseweb="calendar"] span, div[data-baseweb="calendar"] button {{
-            color: #0f172a !important;
-            -webkit-text-fill-color: #0f172a !important;
-        }}
-        div[data-baseweb="calendar"] button:hover {{
-            background-color: #f1f5f9 !important;
-            color: #0f172a !important;
-        }}
-        div[data-baseweb="calendar"] [aria-label*="Today"]:not([aria-selected="true"]) {{
-            border: 1.5px solid {PALETTE['teal']} !important;
-            border-radius: 8px !important;
-            background-color: transparent !important;
-            color: {PALETTE['teal_dark']} !important;
-            -webkit-text-fill-color: {PALETTE['teal_dark']} !important;
-        }}
-        div[data-baseweb="calendar"] [aria-selected="true"] {{
-            background-color: {PALETTE['teal']} !important;
-            color: #ffffff !important;
-            -webkit-text-fill-color: #ffffff !important;
-            border-radius: 8px !important;
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown(f"""<style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+    html,body,[class*="css"]{{font-family:'Plus Jakarta Sans',sans-serif;color:{PALETTE['text']}}}
+    .stApp{{background:{PALETTE['bg']}}} #MainMenu,footer{{visibility:hidden}}
+    section[data-testid="stSidebar"]{{background:linear-gradient(180deg,{PALETTE['navy']},{PALETTE['secondary_navy']});border-right:1px solid rgba(255,255,255,.08)}}
+    section[data-testid="stSidebar"] *{{color:#fff!important}}
+    .hr-card{{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:1.4rem 1.6rem;margin-bottom:1rem;box-shadow:0 5px 22px rgba(11,28,44,.05)}}
+    .hr-metric{{background:linear-gradient(135deg,{PALETTE['navy']},{PALETTE['secondary_navy']});color:#fff;border-radius:16px;padding:1.2rem;box-shadow:0 10px 25px rgba(11,28,44,.12);text-align:center}}
+    .hr-metric .label{{font-size:.72rem;color:#94a3b8;text-transform:uppercase;letter-spacing:.7px;font-weight:700}} .hr-metric .value{{font-size:1.7rem;font-weight:700;color:{PALETTE['teal']};margin-top:.25rem}}
+    .hr-pill{{display:inline-block;padding:.3rem .8rem;border-radius:30px;font-size:.7rem;font-weight:700;text-transform:uppercase}} .pill-active{{background:#dcfce7;color:#166534!important}} .pill-pending{{background:#fef9c3;color:#854d0e!important}} .pill-rejected{{background:#fee2e2;color:#991b1b!important}}
+    div[data-baseweb="popover"],div[data-baseweb="calendar"]{{background:#fff!important;color:#0f172a!important;border-radius:12px!important;box-shadow:0 10px 25px rgba(0,0,0,.15)!important}}
+    div[data-baseweb="calendar"] *{{color:#0f172a!important;-webkit-text-fill-color:#0f172a!important}}
+    .login-card{{max-width:520px;margin:6vh auto 0;background:rgba(255,255,255,.97);border:1px solid rgba(255,255,255,.9);border-radius:24px;padding:2rem;box-shadow:0 20px 50px rgba(0,0,0,.22)}}
+    .login-brand{{text-align:center;margin-bottom:1.5rem}} .login-brand h1{{margin:.4rem 0 .2rem;font-size:1.7rem}} .login-brand p{{color:{PALETTE['muted']};margin:0}}
+    [data-testid="stForm"]{{border-radius:16px}}
+    </style>""",unsafe_allow_html=True)
 
 
 def render_sidebar_brand():
-    logo_b64 = logo_base64()
     with st.sidebar:
-        if logo_b64:
-            st.markdown(
-                f"""
-                <div style="display:flex; align-items:center; gap:10px; margin-bottom:1rem;">
-                    <img src="data:image/png;base64,{logo_b64}" style="height:38px; border-radius:6px; background:white; padding:2px;" />
-                    <div>
-                        <div style="font-weight:700; font-size:0.95rem; line-height:1.2; color:#ffffff;">TEC TANIVA</div>
-                        <div style="font-size:0.65rem; color:#94a3b8 !important;">HRMS Portal</div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-        else:
-            st.markdown("### 🏢 TEC TANIVA HRMS")
+        logo=logo_base64()
+        if logo: st.markdown(f'<div style="display:flex;gap:10px;align-items:center;margin-bottom:12px"><img src="data:image/png;base64,{logo}" style="height:38px;border-radius:6px;background:white;padding:2px"><div><b>TEC TANIVA</b><div style="font-size:.65rem;color:#94a3b8!important">HRMS Portal</div></div></div>',unsafe_allow_html=True)
+        else: st.markdown("### 🏢 TEC TANIVA HRMS")
         st.markdown("---")
 
 
+def _logout():
+    for k in list(st.session_state.keys()): del st.session_state[k]
+    st.rerun()
+
+
 def require_login(role="admin"):
-    if not st.session_state.get("authenticated"):
-        auth_token = _get_query_param("auth")
-        if auth_token:
-            session_data = _verify_token(auth_token)
-            if session_data and session_data["role"] == role:
-                st.session_state["authenticated"] = True
-                st.session_state["username"] = session_data["username"]
-                st.session_state["role"] = session_data["role"]
-                st.session_state["employee_code"] = session_data["employee_code"]
+    if st.session_state.get("authenticated"):
+        if st.session_state.get("role") != role:
+            st.error("This session belongs to another portal. Please sign out and sign in again.")
+            if st.button("Sign Out", type="primary"): _logout()
+            st.stop()
+        last=st.session_state.get("last_activity",time.time())
+        if time.time()-last>SESSION_TIMEOUT_SECONDS:
+            _logout()
+        st.session_state["last_activity"]=time.time()
+        return
 
-    if not st.session_state.get("authenticated"):
-        bg_filename = "admin_bg.png" if role == "admin" else "employee_bg.png"
-        bg_path = os.path.join(ASSETS_DIR, bg_filename)
-        bg_b64 = get_base64_image(bg_path)
-
-        if bg_b64:
-            st.markdown(
-                f"""
-                <style>
-                .stApp {{
-                    background-image: linear-gradient(rgba(11, 28, 44, 0.15), rgba(11, 28, 44, 0.15)), url("data:image/png;base64,{bg_b64}");
-                    background-size: cover;
-                    background-position: center;
-                    background-repeat: no-repeat;
-                    background-attachment: fixed;
-                }}
-                [data-testid="stForm"] {{
-                    background: rgba(255, 255, 255, 0.95) !important;
-                    backdrop-filter: blur(12px) !important;
-                    border-radius: 20px !important;
-                    padding: 2rem 2rem !important;
-                    box-shadow: 0 15px 35px rgba(0,0,0,0.25) !important;
-                    border: 1px solid rgba(255, 255, 255, 0.9) !important;
-                }}
-                </style>
-                """,
-                unsafe_allow_html=True,
-            )
-
-        st.markdown("<div style='height: 8vh;'></div>", unsafe_allow_html=True)
-        col_left, col_right = st.columns([1.25, 1.05])
-
-        with col_right:
-            with st.form("login_form", clear_on_submit=False):
-                username = st.text_input("Username", placeholder="Enter username")
-                password = st.text_input("Password", type="password", placeholder="••••••••")
-                st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-                submitted = st.form_submit_button("Sign In to Portal", use_container_width=True)
-
-                if submitted:
-                    user = authenticate_user(username, password)
-                    if user and user["role"] == role:
-                        token = _make_token(user["username"], user["role"], user.get("employee_code"))
-                        _set_query_param("auth", token)
-                        st.session_state["authenticated"] = True
-                        st.session_state["username"] = user["username"]
-                        st.session_state["role"] = user["role"]
-                        st.session_state["employee_code"] = user.get("employee_code")
-                        st.rerun()
-                    else:
-                        st.error("Invalid credentials or unauthorized portal access.")
-        st.stop()
-
-    elif st.session_state.get("role") != role:
-        st.warning(f"Active session mismatch: Logged in as {st.session_state.get('role')}. Please sign out first.")
-        if st.button("Sign Out"):
-            _clear_query_params()
-            st.session_state.clear()
-            st.rerun()
-        st.stop()
+    bg=get_base64_image(os.path.join(ASSETS_DIR,"admin_bg.png" if role=="admin" else "employee_bg.png"))
+    if bg:
+        st.markdown(f'<style>.stApp{{background-image:linear-gradient(rgba(11,28,44,.18),rgba(11,28,44,.18)),url("data:image/png;base64,{bg}");background-size:cover;background-position:center;background-attachment:fixed}}</style>',unsafe_allow_html=True)
+    st.markdown('<div class="login-card"><div class="login-brand"><div style="font-size:2.2rem">🔐</div><h1>TEC TANIVA HRMS</h1><p>Secure Employee Portal Access</p></div>',unsafe_allow_html=True)
+    with st.form(f"login_form_{role}"):
+        username=st.text_input("Username",placeholder="Enter your portal username",autocomplete="username")
+        password=st.text_input("Password",type="password",placeholder="Enter your password",autocomplete="current-password")
+        submitted=st.form_submit_button("Sign In",type="primary",use_container_width=True)
+        if submitted:
+            if not username.strip() or not password:
+                st.error("Please enter both username and password.")
+            else:
+                user=authenticate_user(username,password)
+                if user and user.get("role")==role:
+                    st.session_state.update(authenticated=True,username=user["username"],role=user["role"],employee_code=user.get("employee_code"),last_activity=time.time())
+                    st.rerun()
+                elif user:
+                    st.error("This account is not authorized for this portal.")
+                else:
+                    st.error("Invalid username or password.")
+    st.markdown('<div style="text-align:center;color:#64748b;font-size:.8rem;margin-top:12px">If you cannot sign in, contact HR/Admin to reset your portal password.</div></div>',unsafe_allow_html=True)
+    st.stop()
 
 
 def logout_button():
     with st.sidebar:
         st.markdown("---")
-        if st.button("🚪 Sign Out", use_container_width=True):
-            _clear_query_params()
-            st.session_state.clear()
-            st.rerun()
+        if st.button("🚪 Sign Out",use_container_width=True): _logout()
 
 
-def metric_card(label, value):
-    st.markdown(
-        f"""
-        <div class="hr-metric">
-            <div class="label">{label}</div>
-            <div class="value">{value}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+def metric_card(label,value): st.markdown(f'<div class="hr-metric"><div class="label">{label}</div><div class="value">{value}</div></div>',unsafe_allow_html=True)
 
 
 def status_pill(status):
-    cls = "pill-pending"
-    if status in ["Active", "Approved"]:
-        cls = "pill-active"
-    elif status in ["Rejected", "Terminated", "Inactive"]:
-        cls = "pill-rejected"
+    status=status or "Unknown"; cls="pill-pending"
+    if status in {"Active","Approved"}: cls="pill-active"
+    elif status in {"Rejected","Terminated","Inactive"}: cls="pill-rejected"
     return f'<span class="hr-pill {cls}">{status}</span>'
