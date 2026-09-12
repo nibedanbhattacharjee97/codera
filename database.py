@@ -74,7 +74,9 @@ def init_db():
             phonebill_pay REAL DEFAULT 0,
             others REAL DEFAULT 0,
             pf REAL DEFAULT 0,
+            employer_pf REAL DEFAULT 0,
             esic_if_applicable TEXT CHECK(esic_if_applicable IN ('Yes', 'No')) DEFAULT 'No',
+            employer_esic REAL DEFAULT 0,
             food_reimbursement TEXT CHECK(food_reimbursement IN ('Yes', 'No')) DEFAULT 'No',
             ctc REAL DEFAULT 0,
 
@@ -173,14 +175,28 @@ def change_password(username: str, new_password: str):
 
 
 # ---------------------------------------------------------------------------
-# EMPLOYEES & CTC CALCULATION LOGIC
+# EMPLOYEES & CTC CALCULATION LOGIC (With Employer Contributions)
 # ---------------------------------------------------------------------------
 def calculate_ctc(basic, hra, phonebill, others, esic_if_applicable):
-    """CTC = Basic + HRA + Others + Phone Bill - ₹1000 if ESIC Applicable is Yes."""
-    total = float(basic or 0) + float(hra or 0) + float(phonebill or 0) + float(others or 0)
-    if esic_if_applicable == "Yes":
-        total -= 1000.0
-    return max(0.0, round(total, 2))
+    """
+    Computes total CTC including Basic, HRA, Phone Bill, Others, 
+    plus Employer PF contribution (12% of basic, capped at ₹1,800 statutory limit) 
+    and Employer ESIC contribution (3.25%) if ESIC is applicable.
+    """
+    b = float(basic or 0)
+    h = float(hra or 0)
+    p = float(phonebill or 0)
+    o = float(others or 0)
+    
+    # Employer PF: 12% of basic, capped standard at ₹1,800 or actual based on basic
+    employer_pf = min(b * 0.12, 1800.0)
+    
+    # Employer ESIC: 3.25% of gross wages if ESIC applies
+    gross_approx = b + h + p + o
+    employer_esic = round(gross_approx * 0.0325, 2) if esic_if_applicable == "Yes" else 0.0
+
+    total = b + h + p + o + employer_pf + employer_esic
+    return max(0.0, round(total, 2)), round(employer_pf, 2), round(employer_esic, 2)
 
 
 def add_employee(data: dict):
