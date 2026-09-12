@@ -450,7 +450,7 @@ def get_statutory_summary():
     conn = get_connection()
     row = conn.execute("""
         SELECT
-            COALESCE(SUM(employer_epf), 0)            AS total_employer_epf,
+            COALESCE(SUM(employer_pf), 0)              AS total_employer_epf,
             COALESCE(SUM(employer_eps), 0)             AS total_employer_eps,
             COALESCE(SUM(employer_edli), 0)            AS total_employer_edli,
             COALESCE(SUM(employer_admin_charges), 0)   AS total_admin_charges,
