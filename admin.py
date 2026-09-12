@@ -14,7 +14,7 @@ from database import (
     get_all_employees, employee_count, next_employee_code, calculate_ctc,
     create_user, username_exists, get_leave_requests, decide_leave,
     get_all_employee_names, add_announcement, get_announcements,
-    get_statutory_summary, get_user_by_employee_code, reset_employee_password, get_database_info,
+    get_user_by_employee_code, reset_employee_password, get_database_info,
 )
 from utils import (
     inject_css, render_sidebar_brand, require_login,
@@ -79,8 +79,8 @@ with c4: metric_card("Total Monthly CTC", f"₹ {total_ctc:,.0f}")
 
 st.write("")
 
-tab_add, tab_directory, tab_statutory, tab_leaves, tab_access, tab_announce = st.tabs(
-    ["➕ Onboard Employee", "📇 Employee Directory", "🧮 Statutory Summary",
+tab_add, tab_directory, tab_leaves, tab_access, tab_announce = st.tabs(
+    ["➕ Onboard Employee", "📇 Employee Directory",
      "🗓️ Leave Approvals", "🔐 Portal Access", "📢 Announcements"]
 )
 
@@ -324,24 +324,6 @@ with tab_directory:
             use_container_width=True
         )
 
-with tab_statutory:
-    st.subheader("Company-Wide Statutory Contribution Summary")
-    summary = get_statutory_summary()
-    if not summary or not summary.get("employee_count"):
-        st.info("No active employees yet — statutory totals will appear here once employees are onboarded.")
-    else:
-        g1, g2, g3, g4 = st.columns(4)
-        with g1: metric_card("Employer EPF Total", f"₹ {summary['total_employer_epf']:,.0f}")
-        with g2: metric_card("Employer EPS Total", f"₹ {summary['total_employer_eps']:,.0f}")
-        with g3: metric_card("Employer EDLI Total", f"₹ {summary['total_employer_edli']:,.0f}")
-        with g4: metric_card("Employer Admin Charges", f"₹ {summary['total_admin_charges']:,.0f}")
-
-        st.write("")
-        h1, h2, h3 = st.columns(3)
-        with h1: metric_card("Total Employer PF Outgo", f"₹ {summary['total_employer_pf']:,.0f}")
-        with h2: metric_card("Total Employer ESIC", f"₹ {summary['total_employer_esic']:,.0f}")
-        with h3: metric_card("Total Employee PF + ESIC (deductions)", f"₹ {summary['total_employee_pf'] + summary['total_employee_esic']:,.0f}")
-
 with tab_leaves:
     st.subheader("Employee Leave Requests")
     reqs = get_leave_requests()
@@ -380,8 +362,6 @@ with tab_access:
         pick2 = st.selectbox("Employee", list(opt.keys()), key="access_emp_pick")
         sel_emp_code = opt[pick2]
 
-        # Clear any previously displayed credentials when the admin switches
-        # to a different employee, so old creds aren't mistaken for new ones.
         if st.session_state.get("last_access_emp_code") != sel_emp_code:
             st.session_state["last_access_emp_code"] = sel_emp_code
             st.session_state.pop("last_generated_creds", None)
