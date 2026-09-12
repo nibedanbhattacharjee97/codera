@@ -291,15 +291,19 @@ def require_login(role="admin"):
             </style>
             """, unsafe_allow_html=True)
 
-    st.markdown("<div style='height: 10vh;'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height: 8vh;'></div>", unsafe_allow_html=True)
     
-    # Balanced centering layout so both Admin and Employee login panels are the exact same compact width and aligned
-    _, col, _ = st.columns([1.2, 1.1, 1.2])
+    # Shifted to a two-column layout: left column acts as a spacer, right column holds the login box
+    left_spacer, col = st.columns([1.2, 1.0], gap="large")
+    
+    with left_spacer:
+        st.write("") # Left side reserved for branding backdrop visuals
+
     with col:
         portal_title = "Admin Portal" if role == "admin" else "Employee Portal"
         st.markdown(
             f"""
-            <div style="text-align: center; margin-bottom: 1rem;">
+            <div style="text-align: left; margin-bottom: 1rem;">
                 <h3 style="color: #ffffff; font-weight: 700; text-shadow: 0 2px 4px rgba(0,0.5,0.5,0.4); margin-bottom: 0.2rem;">{portal_title}</h3>
                 <p style="color: #cbd5e1; font-size: 0.8rem; font-weight: 500;">Please sign in to continue</p>
             </div>
