@@ -130,7 +130,7 @@ with tab_add:
         with s6: esic_if_applicable = st.selectbox("ESIC Applicable?", ["No", "Yes"], index=1 if emp.get("esic_if_applicable") == "Yes" else 0)
         with s7: food_reimbursement = st.selectbox("Food Reimbursement?", ["No", "Yes"], index=1 if emp.get("food_reimbursement") == "Yes" else 0)
 
-        # Properly unpacking the 3 returned values from calculate_ctc
+        # Unpacking the 3 values from calculate_ctc cleanly
         live_ctc, live_employer_pf, live_employer_esic = calculate_ctc(basic_pay, hra, phonebill_pay, others, esic_if_applicable)
         
         st.markdown(
