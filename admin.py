@@ -309,3 +309,14 @@ with tab_announce:
             add_announcement(title.strip(), message.strip())
             st.success("Announcement published successfully to employee portal feeds.")
             st.rerun()
+
+render_sidebar_brand()
+with st.sidebar:
+    st.markdown(f"**Signed in as** \n{st.session_state.get('username')}")
+    st.markdown('<span class="hr-pill pill-active">ADMIN</span>', unsafe_allow_html=True)
+    st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
+    
+    # Direct Logout Option in Sidebar
+    if st.button("🚪 Sign Out", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
