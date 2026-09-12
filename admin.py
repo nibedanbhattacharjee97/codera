@@ -46,7 +46,7 @@ render_sidebar_brand()
 
 with st.sidebar:
     st.markdown(f"**Signed in as** \n{st.session_state.get('username')}")
-    st.markdown('<span class="hr-pill pill-active">ADMIN</span>', unsafe_allow_html=True)
+    st.markdown('<span class="hr-pill pill-active"></span>', unsafe_allow_html=True)
     st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
     if st.button("🚪 Sign Out (Sidebar)", use_container_width=True):
         perform_logout()
