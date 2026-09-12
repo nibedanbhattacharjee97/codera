@@ -2,52 +2,6 @@
 database.py
 Handles SQLite database setup, connections, and CRUD operations
 for TEC TANIVA HRMS.
-
-Statutory logic implemented (India, FY 2026 rates as published by EPFO/ESIC):
-
-PROVIDENT FUND (EPF/EPS/EDLI)
-    - "PF Wage" = Basic + Dearness Allowance (DA). Retaining allowance is not
-      modelled since this app doesn't track it separately.
-    - Contribution Basis (chosen per employee):
-        "capped"  -> PF Wage is capped at the statutory ceiling of Rs. 15,000/month.
-                     This is the default/mandatory basis for employees whose
-                     Basic+DA is at or below the ceiling.
-        "actual"  -> Employer & employee voluntarily contribute 12% on the full,
-                     uncapped Basic+DA (a joint employer/employee election under
-                     Para 26(6) of the EPF Scheme). EPS still stays capped.
-    - Employee contribution : 12% of PF Wage (per the basis above) -> EPF account.
-    - Employer contribution : also 12% of the SAME PF Wage in total, split as:
-        - EPS (Pension)  : 8.33% of wage, but ALWAYS capped at the Rs. 15,000
-                           ceiling, i.e. max Rs. 1,250/month, regardless of basis.
-        - EPF            : the remainder of the employer's 12% after EPS
-                           (this is the statutorily correct way to derive it -
-                           it only equals a flat 3.67% when PF Wage == ceiling).
-      Plus employer-only statutory charges:
-        - EDLI                 : 0.5% of PF Wage, capped at Rs. 75/employee/month.
-        - EPFO Admin Charges   : 0.5% of PF Wage (on the actual/uncapped wage if
-                                  the "actual" basis is chosen - the employer picks
-                                  up admin charges on the higher base too). Note:
-                                  in real EPFO remittance this is reconciled at the
-                                  ESTABLISHMENT level with a Rs. 500/month minimum
-                                  (Rs. 75 if there are no contributing members that
-                                  month) - this app computes it per-employee as an
-                                  estimate for CTC purposes only.
-
-EMPLOYEES' STATE INSURANCE (ESI)
-    - Applicable only when Gross Wages <= the ESI wage ceiling AND the employer
-      has marked the employee as ESIC-applicable.
-    - Wage ceiling is Rs. 21,000/month, or Rs. 25,000/month for employees with
-      disabilities.
-    - Employer contribution : 3.25% of Gross Wages.
-    - Employee contribution : 0.75% of Gross Wages (in practice waived for
-      average daily wages <= Rs. 176, not separately modelled here).
-
-CTC (Cost to Company)
-    - Gross = Basic + DA + HRA + Phone Bill + Others.
-    - CTC = Gross + Employer PF Total (EPF + EPS + EDLI + Admin Charges)
-            + Employer ESIC (if applicable).
-    - Employee-side deductions (Employee PF, Employee ESIC) reduce take-home
-      pay but do NOT add to CTC - they come out of the Gross already counted.
 """
 
 import sqlite3
@@ -62,8 +16,8 @@ DB_PATH = os.path.join(DB_DIR, "hr_system.db")
 # ---------------------------------------------------------------------------
 # STATUTORY CONSTANTS (India - PF & ESI, FY 2026)
 # ---------------------------------------------------------------------------
-PF_WAGE_CEILING = 15000.0        # Statutory PF wage ceiling (Rs./month)
-EPF_EMPLOYEE_RATE = 0.12         # Employee share -> EPF account (on PF wage per basis)
+PF_WAGE_CEILING = 15000.0       # Statutory PF wage ceiling (Rs./month)
+EPF_EMPLOYEE_RATE = 0.12        # Employee share -> EPF account (on PF wage per basis)
 EMPLOYER_PF_TOTAL_RATE = 0.12    # Employer's combined EPF+EPS share (on PF wage per basis)
 EPS_EMPLOYER_RATE = 0.0833       # Employer's Pension Scheme share, applied to capped wage
 EPS_MAX_MONTHLY = 1250.0         # EPS is always capped here (8.33% of 15,000 ceiling)
@@ -76,7 +30,7 @@ ESI_WAGE_CEILING_PWD = 25000.0        # Higher ceiling for employees with disabi
 ESI_EMPLOYER_RATE = 0.0325            # Employer share of gross wages
 ESI_EMPLOYEE_RATE = 0.0075            # Employee share of gross wages
 
-PF_BASIS_OPTIONS = ["capped", "actual"]  # "capped" = statutory ceiling, "actual" = voluntary full wage
+PF_BASIS_OPTIONS = ["capped", "actual"]
 
 
 def get_connection():
@@ -91,8 +45,6 @@ def hash_password(password: str) -> str:
 
 
 def _ensure_column(cur, table, column, coltype_and_default):
-    """Add a column to an existing table if it doesn't already exist.
-    Lets the app evolve its schema without breaking existing installs/data."""
     cur.execute(f"PRAGMA table_info({table})")
     existing = {row[1] for row in cur.fetchall()}
     if column not in existing:
@@ -100,7 +52,6 @@ def _ensure_column(cur, table, column, coltype_and_default):
 
 
 def init_db():
-    """Create all required tables, migrate schema, and seed a default admin user if none exists."""
     conn = get_connection()
     cur = conn.cursor()
 
@@ -201,11 +152,13 @@ def init_db():
 
     conn.commit()
 
-    # --- Schema migration for installs created before this PF/ESI rework ---
+    # --- Fully Patched Schema Migration Loop ---
     for col, decl in [
         ("da", "REAL DEFAULT 0"),
         ("pf_basis", "TEXT DEFAULT 'capped'"),
         ("pf_wage", "REAL DEFAULT 0"),
+        ("pf", "REAL DEFAULT 0"),
+        ("employer_pf", "REAL DEFAULT 0"),
         ("employer_eps", "REAL DEFAULT 0"),
         ("employer_edli", "REAL DEFAULT 0"),
         ("employer_admin_charges", "REAL DEFAULT 0"),
@@ -213,6 +166,7 @@ def init_db():
         ("is_pwd", "INTEGER DEFAULT 0"),
         ("esic_wage_ceiling_used", "REAL DEFAULT 0"),
         ("esic_eligible_by_wage", "INTEGER DEFAULT 0"),
+        ("employer_esic", "REAL DEFAULT 0"),
         ("employee_esic", "REAL DEFAULT 0"),
     ]:
         _ensure_column(cur, "employees", col, decl)
@@ -230,9 +184,6 @@ def init_db():
     conn.close()
 
 
-# ---------------------------------------------------------------------------
-# AUTHENTICATION & USERS
-# ---------------------------------------------------------------------------
 def authenticate_user(username: str, password: str):
     conn = get_connection()
     cur = conn.cursor()
@@ -279,25 +230,7 @@ def change_password(username: str, new_password: str):
     conn.close()
 
 
-# ---------------------------------------------------------------------------
-# EMPLOYEES & CTC CALCULATION LOGIC
-# ---------------------------------------------------------------------------
 def calculate_ctc(basic, da, hra, phonebill, others, esic_if_applicable, pf_basis="capped", is_pwd=False):
-    """
-    Computes the full statutory PF and ESI breakdown, and the resulting CTC.
-
-    Args:
-        basic, da, hra, phonebill, others : monthly amounts in Rupees.
-        esic_if_applicable : "Yes" / "No" - whether the employer has enrolled
-            the employee under ESIC (still subject to the wage-ceiling check).
-        pf_basis : "capped" (statutory minimum - PF wage capped at Rs.15,000) or
-            "actual" (voluntary joint employer/employee election to contribute
-            12% on the full, uncapped Basic+DA). EPS always stays capped.
-        is_pwd : True if the employee is a Person with Disability, which raises
-            the ESI wage ceiling to Rs.25,000 instead of Rs.21,000.
-
-    Returns a tuple: (total_ctc, breakdown_dict)
-    """
     b = max(0.0, float(basic or 0))
     d = max(0.0, float(da or 0))
     h = max(0.0, float(hra or 0))
@@ -307,16 +240,15 @@ def calculate_ctc(basic, da, hra, phonebill, others, esic_if_applicable, pf_basi
     if pf_basis not in PF_BASIS_OPTIONS:
         pf_basis = "capped"
 
-    pf_wage_base = b + d  # Basic + DA is the statutory "PF Wage"
+    pf_wage_base = b + d
     gross = pf_wage_base + h + p + o
 
-    # ---- Provident Fund ----
     pf_wage = min(pf_wage_base, PF_WAGE_CEILING) if pf_basis == "capped" else pf_wage_base
 
     employee_pf = round(pf_wage * EPF_EMPLOYEE_RATE, 2)
 
     employer_pf_total_12pct = round(pf_wage * EMPLOYER_PF_TOTAL_RATE, 2)
-    eps_wage = min(pf_wage, PF_WAGE_CEILING)  # EPS is ALWAYS restricted to the ceiling
+    eps_wage = min(pf_wage, PF_WAGE_CEILING)
     employer_eps = round(min(eps_wage * EPS_EMPLOYER_RATE, EPS_MAX_MONTHLY), 2)
     employer_epf = round(employer_pf_total_12pct - employer_eps, 2)
 
@@ -324,7 +256,6 @@ def calculate_ctc(basic, da, hra, phonebill, others, esic_if_applicable, pf_basi
     employer_admin_charges = round(pf_wage * PF_ADMIN_CHARGE_RATE, 2)
     employer_pf_total = round(employer_epf + employer_eps + employer_edli + employer_admin_charges, 2)
 
-    # ---- ESI (wage ceiling depends on disability status) ----
     esi_ceiling = ESI_WAGE_CEILING_PWD if is_pwd else ESI_WAGE_CEILING_STANDARD
     esic_eligible = (esic_if_applicable == "Yes") and (gross <= esi_ceiling)
     employer_esic = round(gross * ESI_EMPLOYER_RATE, 2) if esic_eligible else 0.0
@@ -436,38 +367,25 @@ def get_all_employee_names():
     return [dict(r) for r in rows]
 
 
-# ---------------------------------------------------------------------------
-# COMPANY-WIDE STATUTORY SUMMARY (for the Admin Dashboard)
-# ---------------------------------------------------------------------------
 def get_statutory_summary():
-    """Aggregate employer-side PF & ESI outgo across all active employees.
-
-    NOTE: EPFO admin charges are, in reality, reconciled at the establishment
-    level with a Rs.500/month minimum (Rs.75 if there are no contributing
-    members that month). This summary reports the per-employee estimate
-    summed up; treat it as an approximation, not the exact ECR challan amount.
-    """
     conn = get_connection()
     row = conn.execute("""
         SELECT
-            COALESCE(SUM(employer_pf), 0)              AS total_employer_epf,
-            COALESCE(SUM(employer_eps), 0)             AS total_employer_eps,
-            COALESCE(SUM(employer_edli), 0)            AS total_employer_edli,
-            COALESCE(SUM(employer_admin_charges), 0)   AS total_admin_charges,
-            COALESCE(SUM(employer_pf_total), 0)        AS total_employer_pf,
-            COALESCE(SUM(employer_esic), 0)            AS total_employer_esic,
-            COALESCE(SUM(employee_esic), 0)            AS total_employee_esic,
-            COALESCE(SUM(pf), 0)                       AS total_employee_pf,
-            COUNT(*)                                   AS employee_count
+            COALESCE(SUM(employer_pf), 0)            AS total_employer_epf,
+            COALESCE(SUM(employer_eps), 0)           AS total_employer_eps,
+            COALESCE(SUM(employer_edli), 0)          AS total_employer_edli,
+            COALESCE(SUM(employer_admin_charges), 0) AS total_admin_charges,
+            COALESCE(SUM(employer_pf_total), 0)      AS total_employer_pf,
+            COALESCE(SUM(employer_esic), 0)          AS total_employer_esic,
+            COALESCE(SUM(employee_esic), 0)          AS total_employee_esic,
+            COALESCE(SUM(pf), 0)                     AS total_employee_pf,
+            COUNT(*)                                 AS employee_count
         FROM employees WHERE status = 'Active'
     """).fetchone()
     conn.close()
     return dict(row) if row else {}
 
 
-# ---------------------------------------------------------------------------
-# LEAVES & BALANCES
-# ---------------------------------------------------------------------------
 def get_leave_balance(employee_code: str):
     conn = get_connection()
     rows = conn.execute(
@@ -514,9 +432,6 @@ def decide_leave(request_id: int, status: str):
     conn.close()
 
 
-# ---------------------------------------------------------------------------
-# ANNOUNCEMENTS
-# ---------------------------------------------------------------------------
 def add_announcement(title, message):
     conn = get_connection()
     conn.execute("INSERT INTO announcements (title, message) VALUES (?, ?)", (title, message))
