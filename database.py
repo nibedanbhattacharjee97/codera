@@ -187,11 +187,17 @@ def init_db() -> None:
             except sqlite3.IntegrityError:
                 pass
 
-    # Upgrade the default admin password only if it still uses the legacy hash.
-    admin = cur.execute("SELECT password_hash FROM users WHERE username='admin' AND role='admin'").fetchone()
-    if admin and not admin["password_hash"].startswith(PASSWORD_SCHEME + "$"):
-        # Keep existing admin credential working; only migrate after a successful login.
-        pass
+    # Ensure a usable admin account exists on a fresh deployment.
+    # Existing admin accounts are NEVER overwritten.
+    admin = cur.execute("SELECT id, password_hash FROM users WHERE username='admin' AND role='admin'").fetchone()
+    if admin is None:
+        default_admin_password = os.getenv("HRMS_ADMIN_PASSWORD", "admin123")
+        if len(default_admin_password) < 8:
+            default_admin_password = "admin123"
+        cur.execute(
+            "INSERT INTO users(username,password_hash,role,full_name) VALUES(?,?,?,?)",
+            ("admin", hash_password(default_admin_password), "admin", "System Administrator"),
+        )
 
     conn.commit()
     conn.close()

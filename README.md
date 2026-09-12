@@ -12,8 +12,12 @@ streamlit run admin.py
 ```
 
 ### Default admin
-The existing legacy admin password remains compatible: `admin / admin123`.
-Change it after first deployment. New passwords are stored with salted PBKDF2-SHA256; old SHA-256 passwords are automatically upgraded after a successful login.
+On a fresh deployment, the application automatically creates the admin account:
+
+- Username: `admin`
+- Password: `admin123`
+
+Set `HRMS_ADMIN_PASSWORD` before first startup if you want a different initial password. Existing admin accounts are never overwritten. Change the default password after first deployment. New passwords are stored with salted PBKDF2-SHA256; old SHA-256 passwords remain compatible and are automatically upgraded after a successful login.
 
 ### Employee login
 The employee username is the username shown by **Admin → Portal Access**. It is normalized to lowercase and surrounding username whitespace is ignored.
