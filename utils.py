@@ -271,11 +271,11 @@ def require_login(role="admin"):
             
             /* Modern Uniform Glassmorphism Login Box Styles */
             [data-testid="stForm"] {{
-                background: rgba(255, 255, 255, 0.18) !important; 
+                background: rgba(255, 255, 255, 0.22) !important; 
                 backdrop-filter: blur(18px) !important;
                 -webkit-backdrop-filter: blur(18px) !important;
                 border-radius: 20px !important; 
-                padding: 1.8rem 2rem !important; 
+                padding: 2rem 2.2rem !important; 
                 box-shadow: 0 15px 35px rgba(0, 0, 0, 0.25) !important;
                 border: 1px solid rgba(255, 255, 255, 0.35) !important;
                 max-width: 420px !important;
@@ -291,27 +291,29 @@ def require_login(role="admin"):
             </style>
             """, unsafe_allow_html=True)
 
-    st.markdown("<div style='height: 8vh;'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height: 10vh;'></div>", unsafe_allow_html=True)
     
-    # Shifted to a two-column layout: left column acts as a spacer, right column holds the login box
-    left_spacer, col = st.columns([1.2, 1.0], gap="large")
+    # Two-column layout: left spacer for background logo visibility, right column for login card
+    left_spacer, col = st.columns([1.1, 1.1], gap="large")
     
     with left_spacer:
-        st.write("") # Left side reserved for branding backdrop visuals
+        st.write("") 
 
     with col:
         portal_title = "Admin Portal" if role == "admin" else "Employee Portal"
-        st.markdown(
-            f"""
-            <div style="text-align: left; margin-bottom: 1rem;">
-                <h3 style="color: #ffffff; font-weight: 700; text-shadow: 0 2px 4px rgba(0,0.5,0.5,0.4); margin-bottom: 0.2rem;">{portal_title}</h3>
-                <p style="color: #cbd5e1; font-size: 0.8rem; font-weight: 500;">Please sign in to continue</p>
-            </div>
-            """, 
-            unsafe_allow_html=True
-        )
         
+        # Grouping title inside the form container so it stays uniformly inside the card
         with st.form(f"login_form_{role}", clear_on_submit=False):
+            st.markdown(
+                f"""
+                <div style="text-align: center; margin-bottom: 1.2rem;">
+                    <h3 style="color: #0f172a; font-weight: 700; margin-bottom: 0.2rem;">{portal_title}</h3>
+                    <p style="color: #475569; font-size: 0.85rem; font-weight: 500;">Please sign in to continue</p>
+                </div>
+                """, 
+                unsafe_allow_html=True
+            )
+            
             username = st.text_input("Username", placeholder="e.g. TT-EMP-0001", autocomplete="username")
             password = st.text_input("Password", type="password", placeholder="Enter password", autocomplete="current-password")
             
