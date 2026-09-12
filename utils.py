@@ -280,7 +280,7 @@ def require_login(role="admin"):
     _, col = st.columns([1.0, 1.25])
     with col:
         st.markdown(f"## {'Admin' if role == 'admin' else 'Employee'} Portal Login")
-        st.caption("Enter your portal username and password.")
+        st.caption("")
         with st.form(f"login_form_{role}", clear_on_submit=False):
             username = st.text_input("Username", placeholder="e.g. TT-EMP-0001", autocomplete="username")
             password = st.text_input("Password", type="password", placeholder="Enter password", autocomplete="current-password")
