@@ -49,10 +49,10 @@ render_portal_sidebar(
 
 col_title, col_logout = st.columns([4, 1])
 with col_title:
-    st.title("🛡️ Admin Dashboard")
-    st.caption("Manage employee records, payroll data, documents, leave and portal access.")
+    #st.title("🛡️ Admin Dashboard")
+    #st.caption("Manage employee records, payroll data, documents, leave and portal access.")
     dbi = get_database_info()
-    st.caption(f"Shared database · Employees: {dbi['employee_count']} · Portal users: {dbi['employee_login_count']}")
+    #st.caption(f"Shared database · Employees: {dbi['employee_count']} · Portal users: {dbi['employee_login_count']}")
 with col_logout:
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
     if st.button("🚪 Sign Out", type="primary", use_container_width=True, key="top_signout"):
