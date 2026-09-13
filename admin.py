@@ -22,11 +22,12 @@ from database import (
     get_leave_balances, get_all_leave_balances, upsert_leave_balance,
     bulk_upsert_leave_balances, generate_payroll, generate_payroll_for_all,
     get_payroll_record, get_all_payroll_records, get_payroll_months_for_employee,
+    get_notification_log, mark_all_notifications_read,
 )
 from utils import (
     inject_css, render_sidebar_brand, require_login, logout_button,
     metric_card, status_pill, render_notification_bell, initials, get_palette,
-    full_logout,
+    full_logout, render_portal_sidebar,
 )
 from payslip import generate_payslip_pdf
 
@@ -38,22 +39,13 @@ require_login(role="admin")
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-render_sidebar_brand()
-
-with st.sidebar:
-    st.markdown(
-        f"""<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
-            <div class="hr-avatar">{initials(st.session_state.get('username',''))}</div>
-            <div>
-                <div style="font-weight:700;">{st.session_state.get('username')}</div>
-                <span class="hr-pill pill-active">ADMIN / HR</span>
-            </div>
-        </div>""",
-        unsafe_allow_html=True,
-    )
-
-render_notification_bell("ADMIN", key_prefix="admin")
-logout_button()
+render_portal_sidebar(
+    recipient_code="ADMIN",
+    display_name=st.session_state.get("username", "Admin"),
+    subtitle="Admin / HR",
+    badges=["ADMIN / HR"],
+    key_prefix="admin",
+)
 
 col_title, col_logout = st.columns([4, 1])
 with col_title:
@@ -84,9 +76,10 @@ with c5: metric_card("Total Monthly CTC", f"₹ {total_ctc:,.0f}")
 
 st.write("")
 
-tab_add, tab_directory, tab_balances, tab_leaves, tab_payroll, tab_access, tab_announce = st.tabs(
+tab_add, tab_directory, tab_balances, tab_leaves, tab_payroll, tab_access, tab_announce, tab_notiflog = st.tabs(
     ["➕ Onboard Employee", "📇 Directory", "🗂️ Leave Balances",
-     "🗓️ Leave Approvals", "💵 Payroll & Payslips", "🔐 Portal Access", "📢 Announcements"]
+     "🗓️ Leave Approvals", "💵 Payroll & Payslips", "🔐 Portal Access", "📢 Announcements",
+     "🔔 Notification Log"]
 )
 
 # ===========================================================================
@@ -641,4 +634,34 @@ with tab_announce:
             <p style="margin:4px 0;">{a['message'] or ''}</p>
             <span style="font-size:0.75rem;opacity:0.7;">{a['created_at']}</span></div>""",
             unsafe_allow_html=True,
+        )
+
+# ===========================================================================
+# TAB: FULL NOTIFICATION / AUDIT LOG
+# ===========================================================================
+with tab_notiflog:
+    st.subheader("Company-Wide Leave Activity Log")
+    st.caption("Every leave event — who applied, who approved it, who rejected it, and when — "
+               "not just the last few shown in the sidebar bell.")
+
+    if st.button("Mark everything as read", key="notiflog_mark_all"):
+        mark_all_notifications_read("ADMIN")
+        st.rerun()
+
+    log = get_notification_log("ADMIN", limit=1000)
+    if not log:
+        st.info("No leave activity recorded yet.")
+    else:
+        log_df = pd.DataFrame(log)[["created_at", "title", "message", "is_read"]]
+        log_df.columns = ["When", "Event", "Details", "Read"]
+        log_df["Read"] = log_df["Read"].map({1: "✅", 0: "🔴 Unread"})
+        search_log = st.text_input("🔍 Search the log (employee name/code, event type, etc.)", key="notiflog_search")
+        if search_log:
+            mask = log_df.apply(lambda r: search_log.lower() in " ".join(str(v).lower() for v in r), axis=1)
+            log_df = log_df[mask]
+        st.dataframe(log_df, use_container_width=True, hide_index=True, height=520)
+        st.download_button(
+            "⬇️ Export Full Activity Log to CSV",
+            log_df.to_csv(index=False).encode("utf-8"),
+            "leave_activity_log.csv", "text/csv", use_container_width=True,
         )

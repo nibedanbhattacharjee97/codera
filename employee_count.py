@@ -18,7 +18,8 @@ from database import (
 )
 from utils import (
     inject_css, render_sidebar_brand, require_login, logout_button,
-    metric_card, status_pill, render_notification_bell, initials,
+    metric_card, status_pill, render_notification_bell, initials, full_logout,
+    render_portal_sidebar,
 )
 from payslip import generate_payslip_pdf
 
@@ -43,23 +44,27 @@ is_permanent = emp.get("employee_type") == "Permanent"
 team_members = get_employees_reporting_to(emp_code)
 is_manager = len(team_members) > 0
 
-render_sidebar_brand()
-with st.sidebar:
-    if emp.get("pic_path") and os.path.exists(emp["pic_path"]):
-        st.image(emp["pic_path"], width=90)
-    else:
-        st.markdown(f'<div class="hr-avatar" style="width:70px;height:70px;font-size:1.6rem;">{initials(emp["employee_name"])}</div>', unsafe_allow_html=True)
-    st.markdown(f"**{emp['employee_name']}** \n{emp.get('designation') or 'Employee'}")
-    badge = "EMPLOYEE PORTAL"
-    st.markdown(f'<span class="hr-pill pill-active">{badge}</span>', unsafe_allow_html=True)
-    if is_manager:
-        st.markdown('<span class="hr-pill pill-muted">TEAM LEAD</span>', unsafe_allow_html=True)
+badges = ["EMPLOYEE PORTAL"]
+if is_manager:
+    badges.append("TEAM LEAD")
 
-render_notification_bell(emp_code, key_prefix="emp")
-logout_button()
+render_portal_sidebar(
+    recipient_code=emp_code,
+    display_name=emp.get("employee_name", emp_code),
+    subtitle=emp.get("designation") or "Employee",
+    photo_path=emp.get("pic_path"),
+    badges=badges,
+    key_prefix="emp",
+)
 
-st.title(f"Welcome, {emp['employee_name'].split(' ')[0]} 👋")
-st.caption("Your self-service portal — profile, leave balances, payslips, and company updates.")
+col_title, col_logout = st.columns([4, 1])
+with col_title:
+    st.title(f"👤 Welcome, {emp['employee_name'].split(' ')[0]}")
+    st.caption("Your self-service portal — profile, leave balances, payslips, and company updates.")
+with col_logout:
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+    if st.button("🚪 Sign Out", type="primary", use_container_width=True, key="top_signout_emp"):
+        full_logout()
 
 bal_map = get_leave_balance_map(emp_code)
 c1, c2, c3, c4 = st.columns(4)

@@ -833,6 +833,13 @@ def decide_leave(request_id: int, status: str, decided_by: str = None):
     msg = (f"Your {ltype_label} request ({req['from_date']} to {req['to_date']}, "
            f"{req['days']:g} day(s)) was {status.lower()} by {decider_label}.")
     create_notification(req["employee_code"], f"Leave {status}", msg, "leave_request", request_id)
+
+    emp_name = get_employee(req["employee_code"])
+    emp_name = emp_name.get("employee_name", req["employee_code"]) if emp_name else req["employee_code"]
+    admin_msg = (f"{emp_name} ({req['employee_code']})'s {ltype_label} request "
+                 f"({req['from_date']} to {req['to_date']}) was {status.upper()} by "
+                 f"{decided_by or 'HR/Admin'}.")
+    create_notification("ADMIN", f"Leave {status}", admin_msg, "leave_request", request_id)
     return True
 
 
@@ -877,6 +884,22 @@ def get_notifications(recipient_code, unread_only=False, limit=30):
     params = [(recipient_code or "").strip()]
     if unread_only:
         query += " AND is_read = 0"
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_notification_log(recipient_code="ADMIN", related_type=None, limit=500):
+    """Full, un-capped notification history for audit purposes (e.g. the
+    Admin 'who applied / who approved / who rejected' activity log)."""
+    conn = get_connection()
+    query = "SELECT * FROM notifications WHERE recipient_code = ?"
+    params = [(recipient_code or "").strip()]
+    if related_type:
+        query += " AND related_type = ?"
+        params.append(related_type)
     query += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
     rows = conn.execute(query, params).fetchall()

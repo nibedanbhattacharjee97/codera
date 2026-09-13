@@ -11,7 +11,7 @@ import os
 import hmac
 import hashlib
 from datetime import datetime
-from database import authenticate_user, get_notifications, unread_notification_count, mark_notification_read, mark_all_notifications_read
+from database import authenticate_user, get_notifications, get_notification_log, unread_notification_count, mark_notification_read, mark_all_notifications_read
 
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 
@@ -297,15 +297,16 @@ def inject_css():
 
         .hr-notif {{
             border-left: 3px solid {P['teal']};
-            background: {P['card']};
+            background: rgba(255,255,255,0.07);
             border-radius: 10px;
             padding: 0.6rem 0.8rem;
             margin-bottom: 0.5rem;
             font-size: 0.82rem;
         }}
-        .hr-notif.unread {{ border-left-color: #ef4444; }}
+        .hr-notif.unread {{ border-left-color: #ef4444; background: rgba(239,68,68,0.10); }}
+        .hr-notif, .hr-notif * {{ color: #f1f5f9 !important; }}
         .hr-notif .notif-title {{ font-weight: 700; margin-bottom: 2px; }}
-        .hr-notif .notif-time {{ font-size: 0.7rem; color: {P['muted']}; margin-top: 3px; }}
+        .hr-notif .notif-time {{ font-size: 0.7rem; opacity: 0.75; margin-top: 3px; }}
 
         /* ---------- Tabs ---------- */
         button[data-baseweb="tab"] {{
@@ -417,6 +418,38 @@ def _format_time(ts):
         return dt.strftime("%d %b, %I:%M %p")
     except Exception:
         return str(ts)
+
+
+def render_portal_sidebar(recipient_code, display_name, subtitle, photo_path=None, badges=None, key_prefix="portal"):
+    """Single source of truth for the sidebar identity block, notification
+    bell, theme toggle and sign-out button. Both admin.py and employee.py
+    call this instead of assembling the sidebar by hand, so the two portals
+    can never drift out of sync again. Wrapped defensively so one broken
+    piece (e.g. a missing photo file) can't take the whole sidebar down.
+    """
+    render_sidebar_brand()
+
+    with st.sidebar:
+        try:
+            if photo_path and os.path.exists(photo_path):
+                st.image(photo_path, width=64)
+            else:
+                st.markdown(f'<div class="hr-avatar">{initials(display_name)}</div>', unsafe_allow_html=True)
+        except Exception:
+            st.markdown(f'<div class="hr-avatar">{initials(display_name)}</div>', unsafe_allow_html=True)
+
+        st.markdown(f"**{display_name or '—'}**  \n{subtitle or ''}")
+        for b in (badges or []):
+            st.markdown(f'<span class="hr-pill pill-active" style="margin-right:4px;">{b}</span>', unsafe_allow_html=True)
+        st.markdown("---")
+
+    render_notification_bell(recipient_code, key_prefix=key_prefix)
+
+    with st.sidebar:
+        theme_toggle_control()
+        st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
+        if st.button("🚪 Sign Out", use_container_width=True, key=f"{key_prefix}_sidebar_signout"):
+            full_logout()
 
 
 def render_notification_bell(recipient_code: str, key_prefix: str = "notif"):
