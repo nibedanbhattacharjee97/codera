@@ -160,6 +160,47 @@ def generate_payslip_pdf(employee: dict, payroll: dict, company_name="TEC TANIVA
     story.append(t2)
     story.append(Spacer(1, 14))
 
+    # -----------------------------------------------------------------
+    # Attendance Adjustments: Loss of Pay (LOP) / Extra Days Worked [NEW]
+    # Only rendered when this payroll snapshot actually has LOP or Extra
+    # day amounts recorded against it, so older/unaffected payslips are
+    # completely unchanged.
+    # -----------------------------------------------------------------
+    lop_days = payroll.get("lop_days", 0) or 0
+    extra_days = payroll.get("extra_days", 0) or 0
+    lop_amount = payroll.get("lop_amount", 0) or 0
+    extra_amount = payroll.get("extra_amount", 0) or 0
+    per_day_rate = payroll.get("per_day_rate", 0) or 0
+
+    if lop_days or extra_days:
+        story.append(section_header("Attendance Adjustments (Loss of Pay / Extra Days)"))
+        att_rows = [
+            ["Per-Day Rate (Gross ÷ 26)", f"₹ {per_day_rate:,.2f}"],
+        ]
+        if lop_days:
+            att_rows.append([f"Loss of Pay ({lop_days:g} day(s))", f"- ₹ {lop_amount:,.2f}"])
+        if extra_days:
+            att_rows.append([f"Extra Days Worked ({extra_days:g} day(s))", f"+ ₹ {extra_amount:,.2f}"])
+        net_adjustment = extra_amount - lop_amount
+        att_rows.append([
+            Paragraph("<b>Net Attendance Adjustment</b>", styles["Cell"]),
+            Paragraph(
+                f"<b>{'+' if net_adjustment >= 0 else '-'} ₹ {abs(net_adjustment):,.2f}</b>",
+                styles["CellRight"],
+            ),
+        ])
+        t_att = Table(att_rows, colWidths=[110 * mm, 50 * mm])
+        t_att.setStyle(TableStyle([
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
+            ("BACKGROUND", (0, -1), (-1, -1), LIGHT_GREY),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        story.append(t_att)
+        story.append(Spacer(1, 14))
+
     net_pay = payroll.get("net_pay", 0)
     story.append(section_header("Net Pay"))
     net_tbl = Table([

@@ -58,6 +58,19 @@ LEAVE_TYPES = list(LEAVE_TYPE_LABELS.keys())
 MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
                "July", "August", "September", "October", "November", "December"]
 
+# ---------------------------------------------------------------------------
+# LOSS OF PAY (LOP) / EXTRA DAY CONSTANTS  [NEW]
+# ---------------------------------------------------------------------------
+# Per-day salary rate = Gross (Basic + DA + HRA + Phone + Others) / STANDARD_WORKING_DAYS.
+# This is used both to deduct Loss of Pay days (no leave balance left / probation period
+# absence) and to add extra payment for days worked beyond the standard month.
+STANDARD_WORKING_DAYS = 26
+LOP_EXTRA_TYPES = ["LOP", "EXTRA"]
+LOP_EXTRA_TYPE_LABELS = {
+    "LOP": "Loss of Pay",
+    "EXTRA": "Extra Day Worked",
+}
+
 
 def get_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -314,6 +327,23 @@ def init_db():
         )
     """)
 
+    # ---- Loss of Pay (LOP) / Extra Day records table  [NEW] ----
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS lop_extra_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_code TEXT NOT NULL,
+            record_type TEXT NOT NULL CHECK(record_type IN ('LOP', 'EXTRA')),
+            record_date TEXT NOT NULL,
+            day_count REAL NOT NULL DEFAULT 1,
+            reason TEXT,
+            month INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            created_by TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (employee_code) REFERENCES employees(employee_code) ON DELETE CASCADE
+        )
+    """)
+
     conn.commit()
 
     for col, decl in [
@@ -341,6 +371,17 @@ def init_db():
         ("decided_at", "TEXT"),
     ]:
         _ensure_column(cur, "leave_requests", col, decl)
+    conn.commit()
+
+    # ---- payroll_records: add LOP / Extra Day columns  [NEW] ----
+    for col, decl in [
+        ("lop_days", "REAL DEFAULT 0"),
+        ("lop_amount", "REAL DEFAULT 0"),
+        ("extra_days", "REAL DEFAULT 0"),
+        ("extra_amount", "REAL DEFAULT 0"),
+        ("per_day_rate", "REAL DEFAULT 0"),
+    ]:
+        _ensure_column(cur, "payroll_records", col, decl)
     conn.commit()
 
     cur.execute("SELECT id, username FROM users")
@@ -950,6 +991,114 @@ def get_announcements(limit=10):
 
 
 # ---------------------------------------------------------------------------
+# LOSS OF PAY (LOP) & EXTRA DAY RECORDS  [NEW]
+# ---------------------------------------------------------------------------
+# Admin uploads (or manually enters) LOP records for employees who took leave
+# with no balance left / who are in the probation period, and EXTRA records
+# for employees who worked beyond the standard STANDARD_WORKING_DAYS-day
+# month. Both feed into generate_payroll() below, which converts the day
+# counts into a rupee amount using Gross / STANDARD_WORKING_DAYS as the
+# per-day rate, and stores everything on the payroll_records snapshot so it
+# shows up on the payslip.
+
+def add_lop_extra_record(employee_code, record_type, record_date, day_count, reason="", created_by=None):
+    code = (employee_code or "").strip()
+    rtype = (record_type or "").strip().upper()
+    if not code or rtype not in LOP_EXTRA_TYPES:
+        return False
+    try:
+        days = float(day_count)
+    except (TypeError, ValueError):
+        return False
+    if days <= 0:
+        return False
+    try:
+        rdate = str(record_date)
+        y, m = int(rdate[0:4]), int(rdate[5:7])
+    except Exception:
+        return False
+
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO lop_extra_records
+           (employee_code, record_type, record_date, day_count, reason, month, year, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (code, rtype, rdate, days, reason, m, y, created_by),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def bulk_upsert_lop_extra(rows, record_type, created_by=None):
+    """rows: iterable of dicts with employee_code, date, reason, days."""
+    ok, failed = 0, 0
+    for r in rows:
+        code = str(r.get("employee_code", "")).strip()
+        rdate = str(r.get("date", "")).strip()
+        reason = str(r.get("reason", "") or "")
+        try:
+            days = float(r.get("days", 0))
+        except (TypeError, ValueError):
+            failed += 1
+            continue
+        if not code or not rdate or days <= 0:
+            failed += 1
+            continue
+        if add_lop_extra_record(code, record_type, rdate, days, reason, created_by):
+            ok += 1
+        else:
+            failed += 1
+    return ok, failed
+
+
+def delete_lop_extra_record(record_id: int):
+    conn = get_connection()
+    conn.execute("DELETE FROM lop_extra_records WHERE id = ?", (record_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_lop_extra_records(employee_code=None, month=None, year=None, record_type=None):
+    conn = get_connection()
+    query = "SELECT * FROM lop_extra_records WHERE 1=1"
+    params = []
+    if employee_code:
+        query += " AND employee_code = ?"
+        params.append(employee_code)
+    if month:
+        query += " AND month = ?"
+        params.append(month)
+    if year:
+        query += " AND year = ?"
+        params.append(year)
+    if record_type:
+        query += " AND record_type = ?"
+        params.append(record_type.upper())
+    query += " ORDER BY record_date DESC"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_lop_extra_summary(employee_code: str, month: int, year: int):
+    """Returns total LOP days and total Extra days for one employee/month/year."""
+    conn = get_connection()
+    lop_row = conn.execute(
+        "SELECT COALESCE(SUM(day_count),0) as total FROM lop_extra_records "
+        "WHERE employee_code = ? AND month = ? AND year = ? AND record_type = 'LOP'",
+        (employee_code, month, year),
+    ).fetchone()
+    extra_row = conn.execute(
+        "SELECT COALESCE(SUM(day_count),0) as total FROM lop_extra_records "
+        "WHERE employee_code = ? AND month = ? AND year = ? AND record_type = 'EXTRA'",
+        (employee_code, month, year),
+    ).fetchone()
+    conn.close()
+    return {"lop_days": lop_row["total"] or 0.0, "extra_days": extra_row["total"] or 0.0}
+
+
+# ---------------------------------------------------------------------------
 # PAYROLL / PAYSLIP HISTORY
 # ---------------------------------------------------------------------------
 
@@ -982,22 +1131,49 @@ def generate_payroll(employee_code: str, month: int, year: int, generated_by: st
     if not emp:
         return False
     snap = _snapshot_from_employee(emp)
+
+    # ---- Loss of Pay (LOP) / Extra Day adjustment  [NEW] ----
+    # Per-day rate is based on Gross (Basic + DA + HRA + Phone + Others), NOT CTC,
+    # divided by the standard working-day count. LOP days are deducted at this
+    # rate; Extra days worked beyond the standard month are added at this rate.
+    lop_extra = get_lop_extra_summary(employee_code, month, year)
+    lop_days = lop_extra["lop_days"]
+    extra_days = lop_extra["extra_days"]
+    per_day_rate = round(snap["gross"] / STANDARD_WORKING_DAYS, 2) if STANDARD_WORKING_DAYS else 0.0
+    lop_amount = round(per_day_rate * lop_days, 2)
+    extra_amount = round(per_day_rate * extra_days, 2)
+
+    snap["lop_days"] = lop_days
+    snap["lop_amount"] = lop_amount
+    snap["extra_days"] = extra_days
+    snap["extra_amount"] = extra_amount
+    snap["per_day_rate"] = per_day_rate
+    snap["net_pay"] = round(snap["net_pay"] - lop_amount + extra_amount, 2)
+    # ---- end LOP / Extra Day adjustment ----
+
     conn = get_connection()
     conn.execute(
         """INSERT INTO payroll_records
            (employee_code, month, year, basic_pay, da, hra, phonebill_pay, others, gross,
-            employee_pf, employee_esic, employer_pf_total, employer_esic, ctc, net_pay, generated_by, generated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
+            employee_pf, employee_esic, employer_pf_total, employer_esic, ctc, net_pay,
+            lop_days, lop_amount, extra_days, extra_amount, per_day_rate,
+            generated_by, generated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
            ON CONFLICT(employee_code, month, year) DO UPDATE SET
                 basic_pay=excluded.basic_pay, da=excluded.da, hra=excluded.hra,
                 phonebill_pay=excluded.phonebill_pay, others=excluded.others, gross=excluded.gross,
                 employee_pf=excluded.employee_pf, employee_esic=excluded.employee_esic,
                 employer_pf_total=excluded.employer_pf_total, employer_esic=excluded.employer_esic,
-                ctc=excluded.ctc, net_pay=excluded.net_pay, generated_by=excluded.generated_by,
-                generated_at=CURRENT_TIMESTAMP""",
+                ctc=excluded.ctc, net_pay=excluded.net_pay,
+                lop_days=excluded.lop_days, lop_amount=excluded.lop_amount,
+                extra_days=excluded.extra_days, extra_amount=excluded.extra_amount,
+                per_day_rate=excluded.per_day_rate,
+                generated_by=excluded.generated_by, generated_at=CURRENT_TIMESTAMP""",
         (employee_code, month, year, snap["basic_pay"], snap["da"], snap["hra"], snap["phonebill_pay"],
          snap["others"], snap["gross"], snap["employee_pf"], snap["employee_esic"],
-         snap["employer_pf_total"], snap["employer_esic"], snap["ctc"], snap["net_pay"], generated_by),
+         snap["employer_pf_total"], snap["employer_esic"], snap["ctc"], snap["net_pay"],
+         snap["lop_days"], snap["lop_amount"], snap["extra_days"], snap["extra_amount"], snap["per_day_rate"],
+         generated_by),
     )
     conn.commit()
     conn.close()

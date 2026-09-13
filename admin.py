@@ -23,6 +23,9 @@ from database import (
     bulk_upsert_leave_balances, generate_payroll, generate_payroll_for_all,
     get_payroll_record, get_all_payroll_records, get_payroll_months_for_employee,
     get_notification_log, mark_all_notifications_read,
+    # ---- Loss of Pay (LOP) / Extra Days  [NEW] ----
+    STANDARD_WORKING_DAYS, add_lop_extra_record, bulk_upsert_lop_extra,
+    delete_lop_extra_record, get_lop_extra_records, get_lop_extra_summary,
 )
 from utils import (
     inject_css, render_sidebar_brand, require_login, logout_button,
@@ -76,10 +79,10 @@ with c5: metric_card("Total Monthly CTC", f"₹ {total_ctc:,.0f}")
 
 st.write("")
 
-tab_add, tab_directory, tab_balances, tab_leaves, tab_payroll, tab_access, tab_announce, tab_notiflog = st.tabs(
+tab_add, tab_directory, tab_balances, tab_leaves, tab_payroll, tab_lop, tab_access, tab_announce, tab_notiflog = st.tabs(
     ["➕ Onboard Employee", "📇 Directory", "🗂️ Leave Balances",
-     "🗓️ Leave Approvals", "💵 Payroll & Payslips", "🔐 Portal Access", "📢 Announcements",
-     "🔔 Notification Log"]
+     "🗓️ Leave Approvals", "💵 Payroll & Payslips", "💸 Loss of Pay / Extra Days",
+     "🔐 Portal Access", "📢 Announcements", "🔔 Notification Log"]
 )
 
 # ===========================================================================
@@ -522,11 +525,219 @@ with tab_payroll:
     st.markdown("##### 📊 All Generated Payroll Records")
     all_pay = get_all_payroll_records()
     if all_pay:
-        pay_df = pd.DataFrame(all_pay)[["employee_code", "month", "year", "gross", "net_pay", "ctc", "generated_by", "generated_at"]]
+        pay_df = pd.DataFrame(all_pay)[["employee_code", "month", "year", "gross", "lop_days", "lop_amount", "extra_days", "extra_amount", "net_pay", "ctc", "generated_by", "generated_at"]]
         pay_df["month"] = pay_df["month"].apply(lambda m: MONTH_NAMES[m - 1])
         st.dataframe(pay_df, use_container_width=True, hide_index=True)
     else:
         st.info("No payroll records generated yet.")
+
+# ===========================================================================
+# TAB: LOSS OF PAY (LOP) / EXTRA DAYS  [NEW]
+# ===========================================================================
+with tab_lop:
+    st.subheader("Loss of Pay (LOP) & Extra Day Adjustments")
+    st.caption(
+        f"Per-day salary rate = Gross (Basic + DA + HRA + Phone + Others) ÷ {STANDARD_WORKING_DAYS} standard "
+        "working days — **not** CTC. Loss of Pay is recorded when an employee has no leave balance left, or is "
+        "on leave during the probation period. Extra Days is recorded when an employee works beyond the "
+        f"standard {STANDARD_WORKING_DAYS}-day month. Both are saved to the database immediately, and are "
+        "automatically applied the next time you generate/refresh payroll for the affected month — the "
+        "amount then shows up on that employee's payslip."
+    )
+
+    lop_subtab, extra_subtab, records_subtab = st.tabs(
+        ["📉 Loss of Pay", "📈 Extra Days Worked", "📋 All Records"]
+    )
+
+    # -------------------- LOSS OF PAY --------------------
+    with lop_subtab:
+        st.markdown('<div class="hr-card">', unsafe_allow_html=True)
+        st.markdown("##### 📤 Bulk Upload Loss of Pay (Excel / CSV)")
+        st.caption("Required columns: **employee_code**, **date**, **reason**, **days** "
+                   "(use `0.5` for half day, `1` for full day — decimals also work for multi-day spans).")
+        lop_sample = pd.DataFrame({
+            "employee_code": ["TT-EMP-0001", "TT-EMP-0001"],
+            "date": ["2026-09-05", "2026-09-12"],
+            "reason": ["No leave balance remaining", "Absence during probation period"],
+            "days": [1, 0.5],
+        })
+        st.download_button(
+            "⬇️ Download Sample Template",
+            lop_sample.to_csv(index=False).encode("utf-8"),
+            "loss_of_pay_template.csv", "text/csv", key="lop_sample_dl",
+        )
+
+        lop_upload = st.file_uploader("Upload Loss of Pay sheet", type=["xlsx", "xls", "csv"], key="lop_upload")
+        if lop_upload is not None:
+            try:
+                if lop_upload.name.lower().endswith(".csv"):
+                    lop_udf = pd.read_csv(lop_upload)
+                else:
+                    lop_udf = pd.read_excel(lop_upload)
+                lop_udf.columns = [str(c).strip().lower() for c in lop_udf.columns]
+                required = {"employee_code", "date", "reason", "days"}
+                if not required.issubset(set(lop_udf.columns)):
+                    st.error(f"File must contain columns: {', '.join(sorted(required))}")
+                else:
+                    st.dataframe(lop_udf, use_container_width=True, hide_index=True)
+                    if st.button("✅ Confirm & Apply Loss of Pay Records", type="primary",
+                                 use_container_width=True, key="lop_confirm"):
+                        ok, failed = bulk_upsert_lop_extra(
+                            lop_udf.to_dict("records"), "LOP",
+                            created_by=st.session_state.get("username"),
+                        )
+                        st.success(f"Applied {ok} Loss of Pay record(s). {failed} row(s) skipped "
+                                   "(check employee code / date / days).")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"Could not read file: {e}")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown('<div class="hr-card">', unsafe_allow_html=True)
+        st.markdown("##### ✍️ Manual Entry (single record)")
+        if employees:
+            codes_lop = {f"{e['employee_name']} ({e['employee_code']})": e["employee_code"] for e in employees}
+            with st.form("lop_manual_form"):
+                lp1, lp2, lp3 = st.columns(3)
+                with lp1:
+                    lop_pick = st.selectbox("Employee", list(codes_lop.keys()), key="lop_manual_emp")
+                with lp2:
+                    lop_date = st.date_input("Date", value=date.today(), key="lop_manual_date")
+                with lp3:
+                    lop_days_val = st.selectbox(
+                        "Days", [1.0, 0.5],
+                        format_func=lambda x: "1 (Full Day)" if x == 1.0 else "0.5 (Half Day)",
+                        key="lop_manual_days",
+                    )
+                lop_reason = st.text_input(
+                    "Reason", value="No leave balance / probation period absence", key="lop_manual_reason",
+                )
+                lop_submit = st.form_submit_button("➕ Add Loss of Pay Record", use_container_width=True, type="primary")
+                if lop_submit:
+                    ok = add_lop_extra_record(
+                        codes_lop[lop_pick], "LOP", lop_date, lop_days_val, lop_reason,
+                        created_by=st.session_state.get("username"),
+                    )
+                    if ok:
+                        st.success("Loss of Pay record added.")
+                        st.rerun()
+                    else:
+                        st.error("Could not add record. Please check the inputs.")
+        else:
+            st.info("Onboard employees first.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # -------------------- EXTRA DAYS --------------------
+    with extra_subtab:
+        st.markdown('<div class="hr-card">', unsafe_allow_html=True)
+        st.markdown("##### 📤 Bulk Upload Extra Days Worked (Excel / CSV)")
+        st.caption("Required columns: **employee_code**, **date**, **reason**, **days** "
+                   f"(extra day(s) worked beyond the standard {STANDARD_WORKING_DAYS}-day month).")
+        extra_sample = pd.DataFrame({
+            "employee_code": ["TT-EMP-0001", "TT-EMP-0001"],
+            "date": ["2026-09-06", "2026-09-13"],
+            "reason": ["Worked on weekly off", "Worked on holiday"],
+            "days": [1, 1],
+        })
+        st.download_button(
+            "⬇️ Download Sample Template",
+            extra_sample.to_csv(index=False).encode("utf-8"),
+            "extra_days_template.csv", "text/csv", key="extra_sample_dl",
+        )
+
+        extra_upload = st.file_uploader("Upload Extra Days sheet", type=["xlsx", "xls", "csv"], key="extra_upload")
+        if extra_upload is not None:
+            try:
+                if extra_upload.name.lower().endswith(".csv"):
+                    extra_udf = pd.read_csv(extra_upload)
+                else:
+                    extra_udf = pd.read_excel(extra_upload)
+                extra_udf.columns = [str(c).strip().lower() for c in extra_udf.columns]
+                required = {"employee_code", "date", "reason", "days"}
+                if not required.issubset(set(extra_udf.columns)):
+                    st.error(f"File must contain columns: {', '.join(sorted(required))}")
+                else:
+                    st.dataframe(extra_udf, use_container_width=True, hide_index=True)
+                    if st.button("✅ Confirm & Apply Extra Day Records", type="primary",
+                                 use_container_width=True, key="extra_confirm"):
+                        ok, failed = bulk_upsert_lop_extra(
+                            extra_udf.to_dict("records"), "EXTRA",
+                            created_by=st.session_state.get("username"),
+                        )
+                        st.success(f"Applied {ok} Extra Day record(s). {failed} row(s) skipped "
+                                   "(check employee code / date / days).")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"Could not read file: {e}")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown('<div class="hr-card">', unsafe_allow_html=True)
+        st.markdown("##### ✍️ Manual Entry (single record)")
+        if employees:
+            codes_extra = {f"{e['employee_name']} ({e['employee_code']})": e["employee_code"] for e in employees}
+            with st.form("extra_manual_form"):
+                ep1, ep2, ep3 = st.columns(3)
+                with ep1:
+                    extra_pick = st.selectbox("Employee", list(codes_extra.keys()), key="extra_manual_emp")
+                with ep2:
+                    extra_date = st.date_input("Date", value=date.today(), key="extra_manual_date")
+                with ep3:
+                    extra_days_val = st.number_input("Days", min_value=0.5, value=1.0, step=0.5, key="extra_manual_days")
+                extra_reason = st.text_input(
+                    "Reason", value="Worked beyond standard working days", key="extra_manual_reason",
+                )
+                extra_submit = st.form_submit_button("➕ Add Extra Day Record", use_container_width=True, type="primary")
+                if extra_submit:
+                    ok = add_lop_extra_record(
+                        codes_extra[extra_pick], "EXTRA", extra_date, extra_days_val, extra_reason,
+                        created_by=st.session_state.get("username"),
+                    )
+                    if ok:
+                        st.success("Extra Day record added.")
+                        st.rerun()
+                    else:
+                        st.error("Could not add record. Please check the inputs.")
+        else:
+            st.info("Onboard employees first.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # -------------------- ALL RECORDS --------------------
+    with records_subtab:
+        st.markdown("##### 📋 All Loss of Pay / Extra Day Records")
+        rec_filter = st.selectbox(
+            "Filter by type", ["All", "Loss of Pay (LOP)", "Extra Days (EXTRA)"], key="lop_extra_filter",
+        )
+        rtype = None
+        if rec_filter.startswith("Loss"):
+            rtype = "LOP"
+        elif rec_filter.startswith("Extra"):
+            rtype = "EXTRA"
+        all_lop_extra = get_lop_extra_records(record_type=rtype)
+        if not all_lop_extra:
+            st.info("No records yet. Upload a sheet or add entries manually above.")
+        else:
+            rec_df = pd.DataFrame(all_lop_extra)[
+                ["id", "employee_code", "record_type", "record_date", "day_count", "reason", "created_by", "created_at"]
+            ]
+            rec_df.columns = ["ID", "Employee Code", "Type", "Date", "Days", "Reason", "Added By", "Added On"]
+            st.dataframe(rec_df, use_container_width=True, hide_index=True)
+
+            del_id = st.number_input(
+                "Record ID to delete (see ID column above)", min_value=0, step=1, value=0, key="lop_extra_del_id",
+            )
+            if st.button("🗑️ Delete Record by ID", key="lop_extra_del_btn"):
+                if del_id > 0:
+                    delete_lop_extra_record(int(del_id))
+                    st.success(f"Record {int(del_id)} deleted. Re-run payroll for the affected month to update the payslip.")
+                    st.rerun()
+                else:
+                    st.warning("Enter a valid record ID first.")
+
+            st.download_button(
+                "⬇️ Export All Records to CSV",
+                rec_df.to_csv(index=False).encode("utf-8"),
+                "lop_extra_records.csv", "text/csv", use_container_width=True, key="lop_extra_export",
+            )
 
 # ===========================================================================
 # TAB: PORTAL ACCESS
