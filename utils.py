@@ -363,4 +363,4 @@ def status_pill(status):
         cls = "pill-active"
     elif status in ["Rejected", "Terminated", "Inactive"]:
         cls = "pill-rejected"
-    return f'<span class="hr-pill {cls}">{status}</span>'
+    return f'<span class="hr-pill {cls}">{status}</span>'  
