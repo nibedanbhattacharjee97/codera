@@ -5,6 +5,7 @@ guard rails for TEC TANIVA HRMS.
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import base64
 import os
 import hmac
@@ -21,6 +22,35 @@ def _sign(payload: str) -> str:
     return hmac.new(SESSION_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
 
 
+def _make_token(username, role, employee_code):
+    """A small HMAC-signed token (not a secret of the user's, just a receipt
+    that our own server issued) so a browser refresh or a brief dropped
+    connection doesn't bounce someone back to the login screen. It cannot be
+    forged without SESSION_SECRET, but treat it like a 'remember me' cookie:
+    signing out clears it, and it should not be shared as a link."""
+    emp = str(employee_code or "")
+    payload = f"{username}:{role}:{emp}"
+    sig = _sign(payload)
+    data = f"{payload}:{sig}"
+    return base64.urlsafe_b64encode(data.encode()).decode()
+
+
+def _verify_token(token):
+    try:
+        data = base64.urlsafe_b64decode(token.encode()).decode()
+        parts = data.split(":")
+        if len(parts) != 4:
+            return None
+        username, role, emp, sig = parts
+        payload = f"{username}:{role}:{emp}"
+        expected_sig = _sign(payload)
+        if hmac.compare_digest(sig, expected_sig):
+            return {"username": username, "role": role, "employee_code": emp or None}
+    except Exception:
+        pass
+    return None
+
+
 def _get_query_param(key, default=None):
     try:
         if hasattr(st, "query_params"):
@@ -30,6 +60,18 @@ def _get_query_param(key, default=None):
         return vals[0] if vals else default
     except Exception:
         return default
+
+
+def _set_query_param(key, value):
+    try:
+        if hasattr(st, "query_params"):
+            st.query_params[key] = value
+        else:
+            params = st.experimental_get_query_params()
+            params[key] = value
+            st.experimental_set_query_params(**params)
+    except Exception:
+        pass
 
 
 def _clear_query_params():
@@ -42,6 +84,43 @@ def _clear_query_params():
         pass
 
 
+def full_logout():
+    """Single place that fully signs someone out: clears the persisted
+    session token from the URL AND the in-memory session state."""
+    _clear_query_params()
+    st.session_state.clear()
+    st.rerun()
+
+
+def inject_refresh_guard():
+    """Best-effort browser warning before a refresh/close/back navigation,
+    so people don't lose their place by accident. Browsers show their own
+    generic 'Leave site? Changes may not be saved' text — they don't allow
+    custom wording for this dialog, that's a browser security rule, not a
+    limitation of this app."""
+    components.html(
+        """
+        <script>
+        (function() {
+            try {
+                var w = window.parent || window;
+                if (!w.__hrmsUnloadGuard__) {
+                    w.__hrmsUnloadGuard__ = true;
+                    w.addEventListener('beforeunload', function (e) {
+                        e.preventDefault();
+                        e.returnValue = '';
+                        return '';
+                    });
+                }
+            } catch (err) {}
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+@st.cache_data(show_spinner=False)
 def get_base64_image(image_path):
     if os.path.exists(image_path):
         with open(image_path, "rb") as f:
@@ -368,11 +447,29 @@ def render_notification_bell(recipient_code: str, key_prefix: str = "notif"):
 
 
 def require_login(role="admin"):
-    """Strict session-only authentication. No auth tokens are accepted from URLs."""
+    """Session authentication with a lightweight persistence cache.
+
+    A normal Streamlit rerun (clicking a button, etc.) keeps session_state
+    intact. A full browser refresh, or a brief dropped connection, wipes
+    session_state — so before giving up we check for a signed session token
+    in the URL and restore the session from it. Signing out (full_logout)
+    clears that token, so it never outlives an explicit logout.
+    """
     current_role = st.session_state.get("role")
     authenticated = bool(st.session_state.get("authenticated"))
 
+    if not authenticated:
+        cached = _verify_token(_get_query_param("s"))
+        if cached and cached["role"] == role:
+            st.session_state["authenticated"] = True
+            st.session_state["username"] = cached["username"]
+            st.session_state["role"] = cached["role"]
+            st.session_state["employee_code"] = cached["employee_code"]
+            current_role = role
+            authenticated = True
+
     if authenticated and current_role == role:
+        inject_refresh_guard()
         return
 
     if authenticated and current_role != role:
@@ -429,7 +526,9 @@ def require_login(role="admin"):
             """, unsafe_allow_html=True)
 
     st.markdown("<div style='height: 8vh;'></div>", unsafe_allow_html=True)
-    left_spacer, col, right_spacer = st.columns([1, 1.3, 1], gap="large")
+    # Weighted so the card sits in the right half of the screen, clear of the
+    # logo/tagline that the background image carries on its left-hand side.
+    left_spacer, col, right_spacer = st.columns([1.6, 1.15, 0.35], gap="large")
 
     with col:
         portal_title = "Admin / HR Portal" if role == "admin" else "Employee Self-Service Portal"
@@ -464,6 +563,7 @@ def require_login(role="admin"):
                     st.session_state["username"] = user["username"]
                     st.session_state["role"] = user["role"]
                     st.session_state["employee_code"] = user.get("employee_code")
+                    _set_query_param("s", _make_token(user["username"], user["role"], user.get("employee_code")))
                     st.rerun()
                 else:
                     st.error("Invalid username or password.")
@@ -476,9 +576,7 @@ def logout_button():
         theme_toggle_control()
         st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
         if st.button("🚪 Sign Out", use_container_width=True):
-            _clear_query_params()
-            st.session_state.clear()
-            st.rerun()
+            full_logout()
 
 
 def metric_card(label, value):

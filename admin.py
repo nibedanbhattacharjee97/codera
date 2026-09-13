@@ -26,6 +26,7 @@ from database import (
 from utils import (
     inject_css, render_sidebar_brand, require_login, logout_button,
     metric_card, status_pill, render_notification_bell, initials, get_palette,
+    full_logout,
 )
 from payslip import generate_payslip_pdf
 
@@ -63,8 +64,7 @@ with col_title:
 with col_logout:
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
     if st.button("🚪 Sign Out", type="primary", use_container_width=True, key="top_signout"):
-        st.session_state.clear()
-        st.rerun()
+        full_logout()
 
 st.markdown("---")
 
