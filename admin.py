@@ -1,13 +1,16 @@
 """
 admin.py
-Admin Dashboard for managing employee master database, CTC structures,
-documents, leave clearances, and portal logins.
+Admin / HR Dashboard for managing employee master database, CTC structures,
+documents, leave balances & approvals, portal logins, payroll and
+announcements.
 """
 
 import os
+import io
+from datetime import date
+
 import streamlit as st
 import pandas as pd
-from datetime import date
 
 from database import (
     init_db, add_employee, update_employee, delete_employee, get_employee,
@@ -15,11 +18,16 @@ from database import (
     create_user, username_exists, get_leave_requests, decide_leave,
     get_all_employee_names, add_announcement, get_announcements,
     get_user_by_employee_code, reset_employee_password, get_database_info,
+    LEAVE_TYPES, LEAVE_TYPE_LABELS, MONTH_NAMES,
+    get_leave_balances, get_all_leave_balances, upsert_leave_balance,
+    bulk_upsert_leave_balances, generate_payroll, generate_payroll_for_all,
+    get_payroll_record, get_all_payroll_records, get_payroll_months_for_employee,
 )
 from utils import (
-    inject_css, render_sidebar_brand, require_login,
-    metric_card, status_pill, PALETTE,
+    inject_css, render_sidebar_brand, require_login, logout_button,
+    metric_card, status_pill, render_notification_bell, initials, get_palette,
 )
+from payslip import generate_payslip_pdf
 
 st.set_page_config(page_title="Admin Dashboard | TEC TANIVA HRMS", page_icon="🛡️", layout="wide")
 init_db()
@@ -29,61 +37,61 @@ require_login(role="admin")
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-
-def perform_logout():
-    try:
-        if hasattr(st, "query_params"):
-            st.query_params.clear()
-        else:
-            st.experimental_set_query_params()
-    except Exception:
-        pass
-    st.session_state.clear()
-    st.rerun()
-
-
 render_sidebar_brand()
 
 with st.sidebar:
-    st.markdown(f"**Signed in as** \n{st.session_state.get('username')}")
-    st.markdown('<span class="hr-pill pill-active">ADMIN</span>', unsafe_allow_html=True)
-    st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
-    if st.button("🚪 Sign Out (Sidebar)", use_container_width=True):
-        perform_logout()
+    st.markdown(
+        f"""<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+            <div class="hr-avatar">{initials(st.session_state.get('username',''))}</div>
+            <div>
+                <div style="font-weight:700;">{st.session_state.get('username')}</div>
+                <span class="hr-pill pill-active">ADMIN / HR</span>
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+render_notification_bell("ADMIN", key_prefix="admin")
+logout_button()
 
 col_title, col_logout = st.columns([4, 1])
 with col_title:
-    st.title("Admin Dashboard")
+    st.title("🛡️ Admin Dashboard")
     st.caption("Manage employee records, payroll data, documents, leave and portal access.")
     dbi = get_database_info()
-    st.caption(f"Shared database: {dbi['path']} · Employees: {dbi['employee_count']} · Portal users: {dbi['employee_login_count']}")
-
+    st.caption(f"Shared database · Employees: {dbi['employee_count']} · Portal users: {dbi['employee_login_count']}")
 with col_logout:
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-    if st.button("🚪 Sign Out", type="primary", use_container_width=True):
-        perform_logout()
+    if st.button("🚪 Sign Out", type="primary", use_container_width=True, key="top_signout"):
+        st.session_state.clear()
+        st.rerun()
 
 st.markdown("---")
 
 employees = get_all_employees()
 total_emp = employee_count()
 active_emp = len([e for e in employees if e["status"] == "Active"])
+permanent_emp = len([e for e in employees if e.get("employee_type") == "Permanent"])
 pending_leaves = len([r for r in get_leave_requests() if r["status"] == "Pending"])
 total_ctc = sum(e["ctc"] or 0 for e in employees)
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5 = st.columns(5)
 with c1: metric_card("Total Employees", total_emp)
 with c2: metric_card("Active", active_emp)
-with c3: metric_card("Pending Leave Requests", pending_leaves)
-with c4: metric_card("Total Monthly CTC", f"₹ {total_ctc:,.0f}")
+with c3: metric_card("Permanent (Leave-Eligible)", permanent_emp)
+with c4: metric_card("Pending Leave Requests", pending_leaves)
+with c5: metric_card("Total Monthly CTC", f"₹ {total_ctc:,.0f}")
 
 st.write("")
 
-tab_add, tab_directory, tab_leaves, tab_access, tab_announce = st.tabs(
-    ["➕ Onboard Employee", "📇 Employee Directory",
-     "🗓️ Leave Approvals", "🔐 Portal Access", "📢 Announcements"]
+tab_add, tab_directory, tab_balances, tab_leaves, tab_payroll, tab_access, tab_announce = st.tabs(
+    ["➕ Onboard Employee", "📇 Directory", "🗂️ Leave Balances",
+     "🗓️ Leave Approvals", "💵 Payroll & Payslips", "🔐 Portal Access", "📢 Announcements"]
 )
 
+# ===========================================================================
+# TAB: ONBOARD / EDIT EMPLOYEE
+# ===========================================================================
 with tab_add:
     edit_mode = st.session_state.get("edit_employee_code") is not None
     if edit_mode:
@@ -94,6 +102,17 @@ with tab_add:
             st.rerun()
     else:
         emp = {}
+
+    boss_options = {"— None —": None}
+    for e in employees:
+        if not edit_mode or e["employee_code"] != emp.get("employee_code"):
+            boss_options[f"{e['employee_name']} ({e['employee_code']})"] = e["employee_code"]
+    current_boss_label = "— None —"
+    if emp.get("reporting_boss_code"):
+        for label, code in boss_options.items():
+            if code == emp.get("reporting_boss_code"):
+                current_boss_label = label
+                break
 
     st.markdown('<div class="hr-card">', unsafe_allow_html=True)
     with st.form("employee_form", clear_on_submit=False):
@@ -109,12 +128,17 @@ with tab_add:
         with col2:
             designation = st.text_input("Designation", value=emp.get("designation", ""))
             date_of_joining = st.date_input("Date of Joining", value=pd.to_datetime(emp["date_of_joining"]).date() if emp.get("date_of_joining") else date.today())
-            reporting_boss = st.text_input("Reporting Boss", value=emp.get("reporting_boss", ""))
+            boss_label = st.selectbox("Reporting Boss (for leave approvals)", list(boss_options.keys()),
+                                       index=list(boss_options.keys()).index(current_boss_label))
             mobile_number = st.text_input("Mobile Number", value=emp.get("mobile_number", ""))
         with col3:
             uan_number = st.text_input("UAN Number", value=emp.get("uan_number", ""))
             esic_number = st.text_input("ESIC Number", value=emp.get("esic_number", ""))
-            employee_type = st.selectbox("Employee Type", ["Probation", "Permanent"], index=0 if emp.get("employee_type") != "Permanent" else 1)
+            employee_type = st.selectbox(
+                "Employee Type", ["Probation", "Permanent"],
+                index=0 if emp.get("employee_type") != "Permanent" else 1,
+                help="Only Permanent employees are entitled to apply for leave.",
+            )
             place = st.text_input("Place", value=emp.get("place", ""))
 
         col4, col5 = st.columns(2)
@@ -210,7 +234,7 @@ with tab_add:
             extra_doc4 = st.file_uploader("Extra Document 4", type=["png", "jpg", "jpeg", "pdf"])
 
         submit_label = "Update Employee" if edit_mode else "Save Employee Record"
-        submitted = st.form_submit_button(submit_label, use_container_width=True)
+        submitted = st.form_submit_button(submit_label, use_container_width=True, type="primary")
 
         if submitted:
             if not employee_name.strip():
@@ -225,13 +249,17 @@ with tab_add:
                         f.write(upload.getbuffer())
                     return fpath
 
+                boss_code = boss_options.get(boss_label)
+                boss_name = "" if boss_code is None else boss_label.rsplit(" (", 1)[0]
+
                 record = {
                     "employee_name": employee_name.strip(),
                     "dob": str(dob),
                     "highest_qualification": highest_qualification,
                     "date_of_joining": str(date_of_joining),
                     "designation": designation,
-                    "reporting_boss": reporting_boss,
+                    "reporting_boss": boss_name,
+                    "reporting_boss_code": boss_code,
                     "mobile_number": mobile_number,
                     "uan_number": uan_number,
                     "esic_number": esic_number,
@@ -282,6 +310,9 @@ with tab_add:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
+# ===========================================================================
+# TAB: DIRECTORY
+# ===========================================================================
 with tab_directory:
     st.subheader("Employee Master Directory")
     if not employees:
@@ -324,34 +355,189 @@ with tab_directory:
             use_container_width=True
         )
 
+# ===========================================================================
+# TAB: LEAVE BALANCES (admin/HR managed)
+# ===========================================================================
+with tab_balances:
+    st.subheader("Leave Balance Management")
+    st.caption("Only Permanent employees are eligible for paid leave. HR/Admin controls exactly how many "
+               "Casual (CL), Sick (SL) and Privilege (PL) leave days each employee has.")
+
+    st.markdown('<div class="hr-card">', unsafe_allow_html=True)
+    st.markdown("##### 📤 Bulk Upload from Excel / CSV")
+    st.caption("Required columns: **employee_code**, **leave_type** (CL / SL / PL), **leave_balance**")
+    sample = pd.DataFrame({
+        "employee_code": ["TT-EMP-0001", "TT-EMP-0001", "TT-EMP-0001"],
+        "leave_type": ["CL", "SL", "PL"],
+        "leave_balance": [12, 7, 15],
+    })
+    st.download_button("⬇️ Download Sample Template", sample.to_csv(index=False).encode("utf-8"),
+                        "leave_balance_template.csv", "text/csv")
+
+    upload = st.file_uploader("Upload leave balance sheet", type=["xlsx", "xls", "csv"], key="leave_bal_upload")
+    if upload is not None:
+        try:
+            if upload.name.lower().endswith(".csv"):
+                udf = pd.read_csv(upload)
+            else:
+                udf = pd.read_excel(upload)
+            udf.columns = [str(c).strip().lower() for c in udf.columns]
+            required = {"employee_code", "leave_type", "leave_balance"}
+            if not required.issubset(set(udf.columns)):
+                st.error(f"File must contain columns: {', '.join(sorted(required))}")
+            else:
+                st.dataframe(udf, use_container_width=True, hide_index=True)
+                if st.button("✅ Confirm & Apply Leave Balances", type="primary", use_container_width=True):
+                    ok, failed = bulk_upsert_leave_balances(udf.to_dict("records"))
+                    st.success(f"Applied {ok} row(s). {failed} row(s) skipped (check employee code / leave type).")
+                    st.rerun()
+        except Exception as e:
+            st.error(f"Could not read file: {e}")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="hr-card">', unsafe_allow_html=True)
+    st.markdown("##### ✍️ Manual Adjustment (single employee)")
+    if employees:
+        codes = {f"{e['employee_name']} ({e['employee_code']})": e["employee_code"] for e in employees}
+        pick_b = st.selectbox("Employee", list(codes.keys()), key="bal_emp_pick")
+        b_code = codes[pick_b]
+        b_type = get_employee(b_code).get("employee_type")
+        if b_type != "Permanent":
+            st.warning("This employee is on **Probation** and is not eligible for paid leave until marked Permanent.")
+        current = {b["leave_type"]: b["balance"] for b in get_leave_balances(b_code)}
+        bc1, bc2, bc3 = st.columns(3)
+        with bc1:
+            cl_val = st.number_input("CL — Casual Leave", min_value=0.0, value=float(current.get("CL", 0)), step=1.0)
+        with bc2:
+            sl_val = st.number_input("SL — Sick Leave", min_value=0.0, value=float(current.get("SL", 0)), step=1.0)
+        with bc3:
+            pl_val = st.number_input("PL — Privilege Leave", min_value=0.0, value=float(current.get("PL", 0)), step=1.0)
+        if st.button("💾 Save Balances", use_container_width=True):
+            upsert_leave_balance(b_code, "CL", cl_val)
+            upsert_leave_balance(b_code, "SL", sl_val)
+            upsert_leave_balance(b_code, "PL", pl_val)
+            st.success(f"Leave balances updated for {b_code}.")
+            st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("##### 📋 All Leave Balances")
+    all_bal = get_all_leave_balances()
+    if all_bal:
+        bal_df = pd.DataFrame(all_bal)[["employee_code", "leave_type", "balance", "updated_at"]]
+        st.dataframe(bal_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No leave balances set yet. Upload a sheet or set them manually above.")
+
+# ===========================================================================
+# TAB: LEAVE APPROVALS
+# ===========================================================================
 with tab_leaves:
     st.subheader("Employee Leave Requests")
-    reqs = get_leave_requests()
+    st.caption("Admin/HR can view and decide on every leave request across the company, "
+               "regardless of who the reporting boss is.")
+    filter_status = st.selectbox("Filter by status", ["All", "Pending", "Approved", "Rejected"], key="leave_filter")
+    reqs = get_leave_requests(status=None if filter_status == "All" else filter_status)
     if not reqs:
         st.info("No leave requests found.")
     else:
         for r in reqs:
+            emp_r = get_employee(r["employee_code"]) or {}
             st.markdown('<div class="hr-card">', unsafe_allow_html=True)
             cA, cB = st.columns([3, 1])
             with cA:
-                st.markdown(f"**{r['employee_code']}** · {r['leave_type']} Leave · **{r['from_date']}** to **{r['to_date']}** ({r['days']} day(s))")
+                ltype_label = LEAVE_TYPE_LABELS.get(r["leave_type"], r["leave_type"])
+                st.markdown(f"**{emp_r.get('employee_name', r['employee_code'])}** ({r['employee_code']}) · {ltype_label} · **{r['from_date']}** to **{r['to_date']}** ({r['days']:g} day(s))")
                 if r.get("reason"):
                     st.caption(f"Reason: {r['reason']}")
-                st.caption(f"Applied on: {r['applied_on']}")
+                boss_label = r.get("boss_employee_code") or "— No boss assigned —"
+                st.caption(f"Reporting Boss: {boss_label} · Applied on: {r['applied_on']}")
+                if r["status"] != "Pending":
+                    st.caption(f"Decided by: {r.get('decided_by') or '—'} on {r.get('decided_at') or '—'}")
             with cB:
                 st.markdown(status_pill(r["status"]), unsafe_allow_html=True)
                 if r["status"] == "Pending":
                     b1, b2 = st.columns(2)
                     with b1:
                         if st.button("✅", key=f"ap_{r['id']}", help="Approve"):
-                            decide_leave(r["id"], "Approved")
+                            decide_leave(r["id"], "Approved", decided_by=st.session_state.get("username"))
                             st.rerun()
                     with b2:
                         if st.button("❌", key=f"rj_{r['id']}", help="Reject"):
-                            decide_leave(r["id"], "Rejected")
+                            decide_leave(r["id"], "Rejected", decided_by=st.session_state.get("username"))
                             st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
+# ===========================================================================
+# TAB: PAYROLL & PAYSLIPS
+# ===========================================================================
+with tab_payroll:
+    st.subheader("Payroll Runs")
+    st.caption("Snapshot each employee's current salary structure into a monthly payroll record. "
+               "Employees can only download payslips for months you have generated.")
+
+    st.markdown('<div class="hr-card">', unsafe_allow_html=True)
+    pr1, pr2, pr3 = st.columns([1, 1, 1])
+    with pr1:
+        run_month = st.selectbox("Month", MONTH_NAMES, index=date.today().month - 1, key="run_month")
+    with pr2:
+        run_year = st.number_input("Year", min_value=2020, max_value=2100, value=date.today().year, step=1, key="run_year")
+    with pr3:
+        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
+        if st.button("⚙️ Generate Payroll for All Active Employees", type="primary", use_container_width=True):
+            month_num = MONTH_NAMES.index(run_month) + 1
+            count = generate_payroll_for_all(month_num, int(run_year), generated_by=st.session_state.get("username"))
+            st.success(f"Payroll generated/refreshed for {count} active employee(s) for {run_month} {int(run_year)}.")
+            st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("##### 📄 Download Any Employee's Payslip — Any Month, Any Year")
+    st.markdown('<div class="hr-card">', unsafe_allow_html=True)
+    if not employees:
+        st.info("Onboard employees first.")
+    else:
+        codes = {f"{e['employee_name']} ({e['employee_code']})": e["employee_code"] for e in employees}
+        d1, d2, d3 = st.columns([2, 1, 1])
+        with d1:
+            pick_emp = st.selectbox("Employee", list(codes.keys()), key="payslip_emp_pick")
+        with d2:
+            pick_month = st.selectbox("Month", MONTH_NAMES, index=date.today().month - 1, key="payslip_month_pick")
+        with d3:
+            pick_year = st.number_input("Year", min_value=2020, max_value=2100, value=date.today().year, step=1, key="payslip_year_pick")
+
+        target_code = codes[pick_emp]
+        target_month = MONTH_NAMES.index(pick_month) + 1
+        record = get_payroll_record(target_code, target_month, int(pick_year))
+
+        if record is None:
+            st.warning("No payroll snapshot exists yet for this employee/month/year.")
+            if st.button("Generate this snapshot now from current salary structure", use_container_width=True):
+                generate_payroll(target_code, target_month, int(pick_year), generated_by=st.session_state.get("username"))
+                st.rerun()
+        else:
+            emp_full = get_employee(target_code)
+            pdf_bytes = generate_payslip_pdf(emp_full, record)
+            st.download_button(
+                f"⬇️ Download Payslip — {pick_month} {int(pick_year)}",
+                data=pdf_bytes,
+                file_name=f"Payslip_{target_code}_{pick_month}_{int(pick_year)}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                type="primary",
+            )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("##### 📊 All Generated Payroll Records")
+    all_pay = get_all_payroll_records()
+    if all_pay:
+        pay_df = pd.DataFrame(all_pay)[["employee_code", "month", "year", "gross", "net_pay", "ctc", "generated_by", "generated_at"]]
+        pay_df["month"] = pay_df["month"].apply(lambda m: MONTH_NAMES[m - 1])
+        st.dataframe(pay_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No payroll records generated yet.")
+
+# ===========================================================================
+# TAB: PORTAL ACCESS
+# ===========================================================================
 with tab_access:
     st.subheader("Employee Portal Login Access")
     if not employees:
@@ -434,13 +620,25 @@ with tab_access:
                 "This box clears when you pick a different employee."
             )
 
+# ===========================================================================
+# TAB: ANNOUNCEMENTS
+# ===========================================================================
 with tab_announce:
     st.subheader("Publish Company Announcements")
     with st.form("announce_form"):
         title = st.text_input("Notice Title")
         message = st.text_area("Notice Body")
-        post = st.form_submit_button("Publish Announcement", use_container_width=True)
+        post = st.form_submit_button("Publish Announcement", use_container_width=True, type="primary")
         if post and title.strip():
             add_announcement(title.strip(), message.strip())
             st.success("Announcement published successfully to employee portal feeds.")
             st.rerun()
+
+    st.markdown("##### Recent Announcements")
+    for a in get_announcements(10):
+        st.markdown(
+            f"""<div class="hr-card"><b>{a['title']}</b>
+            <p style="margin:4px 0;">{a['message'] or ''}</p>
+            <span style="font-size:0.75rem;opacity:0.7;">{a['created_at']}</span></div>""",
+            unsafe_allow_html=True,
+        )
