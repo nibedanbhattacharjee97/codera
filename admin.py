@@ -49,6 +49,8 @@ render_portal_sidebar(
 
 col_title, col_logout = st.columns([4, 1])
 with col_title:
+    st.title("🛡️ Admin Dashboard")
+    st.caption("Manage employee records, payroll data, documents, leave and portal access.")
     dbi = get_database_info()
     st.caption(f"Shared database · Employees: {dbi['employee_count']} · Portal users: {dbi['employee_login_count']}")
 with col_logout:
