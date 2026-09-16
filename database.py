@@ -2,6 +2,18 @@
 database.py
 Handles SQLite database setup, connections, and CRUD operations
 for TEC TANIVA HRMS.
+
+FIX APPLIED (see _normalize_employee_code below): every place that reads
+or writes an `employee_code` now goes through the same trim+uppercase
+normalization. Previously, functions like get_user_by_employee_code()
+already did this (via lower(trim(...))), but the leave_balances,
+lop_extra_records, leave_requests and payroll_records helpers did NOT -
+they used exact string matching. That meant a manually-typed or
+Excel-bulk-uploaded employee_code that differed only in case or
+whitespace (very easy to happen from an .xlsx export) would silently
+save under a *different* key than the one the Employee Portal looks
+up, so updates made in Admin never appeared for the employee even
+though the row really was written to the database.
 """
 
 import sqlite3
@@ -59,11 +71,8 @@ MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
                "July", "August", "September", "October", "November", "December"]
 
 # ---------------------------------------------------------------------------
-# LOSS OF PAY (LOP) / EXTRA DAY CONSTANTS  [NEW]
+# LOSS OF PAY (LOP) / EXTRA DAY CONSTANTS
 # ---------------------------------------------------------------------------
-# Per-day salary rate = Gross (Basic + DA + HRA + Phone + Others) / STANDARD_WORKING_DAYS.
-# This is used both to deduct Loss of Pay days (no leave balance left / probation period
-# absence) and to add extra payment for days worked beyond the standard month.
 STANDARD_WORKING_DAYS = 26
 LOP_EXTRA_TYPES = ["LOP", "EXTRA"]
 LOP_EXTRA_TYPE_LABELS = {
@@ -81,6 +90,17 @@ def get_connection():
 
 def _normalize_username(username: str) -> str:
     return (username or "").strip().lower()
+
+
+def _normalize_employee_code(code) -> str:
+    """Canonical form for every employee_code stored or looked up
+    anywhere in the app: trimmed, upper-cased. Applying this in ONE
+    place, and calling it from every read/write path below, is what
+    guarantees Admin-side edits (manual entry, bulk CSV/Excel upload,
+    onboarding) always land under the exact same key the Employee
+    Portal queries with - regardless of stray spaces or case coming
+    from a spreadsheet."""
+    return (code or "").strip().upper()
 
 
 def _clean_password(password: str) -> str:
@@ -135,7 +155,7 @@ def _bootstrap_employees_from_excel(conn):
         return 0
     imported = 0
     for _, r in df.iterrows():
-        code = str(r.get("employee_code", "")).strip()
+        code = _normalize_employee_code(r.get("employee_code", ""))
         name = str(r.get("employee_name", "")).strip()
         if not code or not name or code.lower() == "nan":
             continue
@@ -167,12 +187,12 @@ def _bootstrap_employees_from_excel(conn):
     conn.commit()
     employees = conn.execute("SELECT employee_code, employee_name FROM employees").fetchall()
     for emp in employees:
-        code = str(emp["employee_code"]).strip().lower()
+        code = _normalize_employee_code(emp["employee_code"])
         user = conn.execute("SELECT id FROM users WHERE lower(trim(employee_code))=lower(?) AND role='employee' LIMIT 1", (code,)).fetchone()
         if not user:
-            taken = conn.execute("SELECT id FROM users WHERE username=? LIMIT 1", (code,)).fetchone()
+            taken = conn.execute("SELECT id FROM users WHERE username=? LIMIT 1", (code.lower(),)).fetchone()
             if not taken:
-                conn.execute("INSERT INTO users (username,password_hash,role,employee_code,full_name) VALUES (?,?,?,?,?)", (code, hash_password("Welcome@123"), "employee", emp["employee_code"], emp["employee_name"]))
+                conn.execute("INSERT INTO users (username,password_hash,role,employee_code,full_name) VALUES (?,?,?,?,?)", (code.lower(), hash_password("Welcome@123"), "employee", emp["employee_code"], emp["employee_name"]))
     conn.commit()
     return imported
 
@@ -327,7 +347,6 @@ def init_db():
         )
     """)
 
-    # ---- Loss of Pay (LOP) / Extra Day records table  [NEW] ----
     cur.execute("""
         CREATE TABLE IF NOT EXISTS lop_extra_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -373,7 +392,6 @@ def init_db():
         _ensure_column(cur, "leave_requests", col, decl)
     conn.commit()
 
-    # ---- payroll_records: add LOP / Extra Day columns  [NEW] ----
     for col, decl in [
         ("lop_days", "REAL DEFAULT 0"),
         ("lop_amount", "REAL DEFAULT 0"),
@@ -389,6 +407,27 @@ def init_db():
         normalized = _normalize_username(row["username"])
         if normalized != row["username"]:
             cur.execute("UPDATE users SET username = ? WHERE id = ?", (normalized, row["id"]))
+    conn.commit()
+
+    # ---- One-time cleanup: normalize any employee_code values that were
+    # stored before this fix (stray spaces / lowercase from old bulk
+    # uploads) so existing data self-heals on the next app start. ----
+    cur.execute("SELECT id, employee_code FROM employees")
+    for row in cur.fetchall():
+        norm = _normalize_employee_code(row["employee_code"])
+        if norm != row["employee_code"]:
+            cur.execute("UPDATE employees SET employee_code = ? WHERE id = ?", (norm, row["id"]))
+    for table in ("leave_balances", "leave_requests", "lop_extra_records", "payroll_records"):
+        cur.execute(f"SELECT id, employee_code FROM {table}")
+        for row in cur.fetchall():
+            norm = _normalize_employee_code(row["employee_code"])
+            if norm != row["employee_code"]:
+                cur.execute(f"UPDATE {table} SET employee_code = ? WHERE id = ?", (norm, row["id"]))
+    cur.execute("SELECT id, employee_code FROM users WHERE employee_code IS NOT NULL")
+    for row in cur.fetchall():
+        norm = _normalize_employee_code(row["employee_code"])
+        if norm != row["employee_code"]:
+            cur.execute("UPDATE users SET employee_code = ? WHERE id = ?", (norm, row["id"]))
     conn.commit()
 
     cur.execute("SELECT COUNT(*) as c FROM users WHERE role = 'admin'")
@@ -434,11 +473,12 @@ def create_user(username, password, role, employee_code=None, full_name=None):
     conn = get_connection()
     cur = conn.cursor()
     uname = _normalize_username(username)
+    code = _normalize_employee_code(employee_code) if employee_code else None
     try:
         cur.execute(
             """INSERT INTO users (username, password_hash, role, employee_code, full_name)
                VALUES (?, ?, ?, ?, ?)""",
-            (uname, hash_password(password), role, employee_code, full_name),
+            (uname, hash_password(password), role, code, full_name),
         )
         conn.commit()
         return True
@@ -470,7 +510,7 @@ def change_password(username: str, new_password: str):
 
 def get_user_by_employee_code(employee_code: str, role: str = "employee"):
     conn = get_connection()
-    code = (employee_code or "").strip()
+    code = _normalize_employee_code(employee_code)
     row = conn.execute(
         "SELECT * FROM users WHERE lower(trim(employee_code)) = lower(?) AND role = ? ORDER BY id DESC LIMIT 1",
         (code, role),
@@ -480,7 +520,7 @@ def get_user_by_employee_code(employee_code: str, role: str = "employee"):
 
 
 def reset_employee_password(employee_code: str, new_password: str):
-    code = (employee_code or "").strip()
+    code = _normalize_employee_code(employee_code)
     if not code or not _clean_password(new_password):
         return None
 
@@ -498,8 +538,8 @@ def reset_employee_password(employee_code: str, new_password: str):
     if user:
         username = _normalize_username(user["username"])
         conn.execute(
-            "UPDATE users SET username = ?, password_hash = ?, full_name = ? WHERE id = ?",
-            (username, hash_password(new_password), emp["employee_name"], user["id"]),
+            "UPDATE users SET username = ?, password_hash = ?, full_name = ?, employee_code = ? WHERE id = ?",
+            (username, hash_password(new_password), emp["employee_name"], code, user["id"]),
         )
     else:
         username = _normalize_username(code)
@@ -602,6 +642,8 @@ def calculate_ctc(basic, da, hra, phonebill, others, esic_if_applicable, pf_basi
 def add_employee(data: dict):
     conn = get_connection()
     cur = conn.cursor()
+    if "employee_code" in data:
+        data["employee_code"] = _normalize_employee_code(data["employee_code"])
     columns = ", ".join(data.keys())
     placeholders = ", ".join(["?"] * len(data))
     try:
@@ -616,12 +658,13 @@ def add_employee(data: dict):
 
 
 def update_employee(employee_code: str, data: dict):
+    code = _normalize_employee_code(employee_code)
     conn = get_connection()
     cur = conn.cursor()
     data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     set_clause = ", ".join([f"{k} = ?" for k in data.keys()])
     try:
-        cur.execute(f"UPDATE employees SET {set_clause} WHERE employee_code = ?", list(data.values()) + [employee_code])
+        cur.execute(f"UPDATE employees SET {set_clause} WHERE lower(trim(employee_code)) = lower(?)", list(data.values()) + [code])
         conn.commit()
         return True
     except Exception as e:
@@ -632,10 +675,11 @@ def update_employee(employee_code: str, data: dict):
 
 
 def delete_employee(employee_code: str):
+    code = _normalize_employee_code(employee_code)
     conn = get_connection()
-    conn.execute("DELETE FROM employees WHERE employee_code = ?", (employee_code,))
-    conn.execute("DELETE FROM users WHERE employee_code = ?", (employee_code,))
-    conn.execute("DELETE FROM leave_balances WHERE employee_code = ?", (employee_code,))
+    conn.execute("DELETE FROM employees WHERE lower(trim(employee_code)) = lower(?)", (code,))
+    conn.execute("DELETE FROM users WHERE lower(trim(employee_code)) = lower(?)", (code,))
+    conn.execute("DELETE FROM leave_balances WHERE lower(trim(employee_code)) = lower(?)", (code,))
     conn.commit()
     conn.close()
 
@@ -648,8 +692,9 @@ def get_all_employees():
 
 
 def get_employee(employee_code: str):
+    code = _normalize_employee_code(employee_code)
     conn = get_connection()
-    row = conn.execute("SELECT * FROM employees WHERE employee_code = ?", (employee_code,)).fetchone()
+    row = conn.execute("SELECT * FROM employees WHERE lower(trim(employee_code)) = lower(?)", (code,)).fetchone()
     conn.close()
     return dict(row) if row else None
 
@@ -690,7 +735,7 @@ def get_employees_reporting_to(boss_code: str):
     conn = get_connection()
     rows = conn.execute(
         "SELECT * FROM employees WHERE lower(trim(reporting_boss_code)) = lower(?) ORDER BY employee_name",
-        (boss_code.strip(),),
+        (_normalize_employee_code(boss_code),),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -720,18 +765,28 @@ def get_statutory_summary():
 # ---------------------------------------------------------------------------
 
 def upsert_leave_balance(employee_code: str, leave_type: str, balance: float):
-    code = (employee_code or "").strip()
+    code = _normalize_employee_code(employee_code)
     ltype = (leave_type or "").strip().upper()
     if not code or ltype not in LEAVE_TYPES:
         return False
     conn = get_connection()
-    conn.execute(
-        """INSERT INTO leave_balances (employee_code, leave_type, balance, updated_at)
-           VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-           ON CONFLICT(employee_code, leave_type)
-           DO UPDATE SET balance = excluded.balance, updated_at = CURRENT_TIMESTAMP""",
-        (code, ltype, float(balance)),
-    )
+    # Match case-insensitively first so we UPDATE any existing row for this
+    # employee/leave_type even if it was saved under a different case
+    # before this fix, instead of silently inserting a duplicate.
+    existing = conn.execute(
+        "SELECT id FROM leave_balances WHERE lower(trim(employee_code)) = lower(?) AND leave_type = ?",
+        (code, ltype),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE leave_balances SET employee_code = ?, balance = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (code, float(balance), existing["id"]),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO leave_balances (employee_code, leave_type, balance, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+            (code, ltype, float(balance)),
+        )
     conn.commit()
     conn.close()
     return True
@@ -741,7 +796,7 @@ def bulk_upsert_leave_balances(rows):
     """rows: iterable of dicts with employee_code, leave_type, leave_balance."""
     ok, failed = 0, 0
     for r in rows:
-        code = str(r.get("employee_code", "")).strip()
+        code = _normalize_employee_code(r.get("employee_code", ""))
         ltype = str(r.get("leave_type", "")).strip().upper()
         try:
             bal = float(r.get("leave_balance", 0))
@@ -759,9 +814,10 @@ def bulk_upsert_leave_balances(rows):
 
 
 def get_leave_balances(employee_code: str):
+    code = _normalize_employee_code(employee_code)
     conn = get_connection()
     rows = conn.execute(
-        "SELECT * FROM leave_balances WHERE employee_code = ? ORDER BY leave_type", (employee_code,)
+        "SELECT * FROM leave_balances WHERE lower(trim(employee_code)) = lower(?) ORDER BY leave_type", (code,)
     ).fetchall()
     conn.close()
     existing = {r["leave_type"]: dict(r) for r in rows}
@@ -770,7 +826,7 @@ def get_leave_balances(employee_code: str):
         if lt in existing:
             out.append(existing[lt])
         else:
-            out.append({"employee_code": employee_code, "leave_type": lt, "balance": 0.0, "updated_at": None})
+            out.append({"employee_code": code, "leave_type": lt, "balance": 0.0, "updated_at": None})
     return out
 
 
@@ -796,7 +852,8 @@ def adjust_leave_balance(employee_code: str, leave_type: str, delta: float):
 # ---------------------------------------------------------------------------
 
 def apply_leave(employee_code, leave_type, from_date, to_date, days, reason):
-    emp = get_employee(employee_code)
+    code = _normalize_employee_code(employee_code)
+    emp = get_employee(code)
     if not emp:
         return False, "Employee record not found."
     if emp.get("employee_type") != "Permanent":
@@ -806,25 +863,25 @@ def apply_leave(employee_code, leave_type, from_date, to_date, days, reason):
     if ltype not in LEAVE_TYPES:
         return False, "Invalid leave type."
 
-    balance = get_leave_balance_map(employee_code).get(ltype, 0.0)
+    balance = get_leave_balance_map(code).get(ltype, 0.0)
     if float(days) > balance:
         return False, f"Insufficient {LEAVE_TYPE_LABELS[ltype]} balance. Available: {balance:g} day(s), requested: {days:g} day(s)."
 
-    boss_code = (emp.get("reporting_boss_code") or "").strip() or None
+    boss_code = _normalize_employee_code(emp.get("reporting_boss_code")) or None
 
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
         """INSERT INTO leave_requests (employee_code, leave_type, from_date, to_date, days, reason, boss_employee_code)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (employee_code, ltype, str(from_date), str(to_date), days, reason, boss_code),
+        (code, ltype, str(from_date), str(to_date), days, reason, boss_code),
     )
     request_id = cur.lastrowid
     conn.commit()
     conn.close()
 
-    emp_name = emp.get("employee_name", employee_code)
-    msg = f"{emp_name} ({employee_code}) applied for {LEAVE_TYPE_LABELS.get(ltype, ltype)} from {from_date} to {to_date} ({days:g} day(s))."
+    emp_name = emp.get("employee_name", code)
+    msg = f"{emp_name} ({code}) applied for {LEAVE_TYPE_LABELS.get(ltype, ltype)} from {from_date} to {to_date} ({days:g} day(s))."
     if boss_code:
         create_notification(boss_code, "New Leave Request", msg, "leave_request", request_id)
     create_notification("ADMIN", "New Leave Request", msg, "leave_request", request_id)
@@ -837,11 +894,11 @@ def get_leave_requests(employee_code=None, boss_employee_code=None, status=None)
     query = "SELECT * FROM leave_requests WHERE 1=1"
     params = []
     if employee_code:
-        query += " AND employee_code = ?"
-        params.append(employee_code)
+        query += " AND lower(trim(employee_code)) = lower(?)"
+        params.append(_normalize_employee_code(employee_code))
     if boss_employee_code:
         query += " AND lower(trim(boss_employee_code)) = lower(?)"
-        params.append(boss_employee_code.strip())
+        params.append(_normalize_employee_code(boss_employee_code))
     if status:
         query += " AND status = ?"
         params.append(status)
@@ -886,10 +943,11 @@ def decide_leave(request_id: int, status: str, decided_by: str = None):
 
 def get_leave_balance(employee_code: str):
     """Legacy helper kept for backward compatibility (fixed annual pools)."""
+    code = _normalize_employee_code(employee_code)
     conn = get_connection()
     rows = conn.execute(
-        "SELECT leave_type, SUM(days) as used FROM leave_requests WHERE employee_code = ? AND status = 'Approved' GROUP BY leave_type",
-        (employee_code,),
+        "SELECT leave_type, SUM(days) as used FROM leave_requests WHERE lower(trim(employee_code)) = lower(?) AND status = 'Approved' GROUP BY leave_type",
+        (code,),
     ).fetchall()
     conn.close()
 
@@ -910,10 +968,15 @@ def get_leave_balance(employee_code: str):
 
 def create_notification(recipient_code, title, message, related_type=None, related_id=None):
     conn = get_connection()
+    recipient = (recipient_code or "").strip()
+    if recipient.upper() != "ADMIN":
+        recipient = _normalize_employee_code(recipient)
+    else:
+        recipient = "ADMIN"
     conn.execute(
         """INSERT INTO notifications (recipient_code, title, message, related_type, related_id)
            VALUES (?, ?, ?, ?, ?)""",
-        ((recipient_code or "").strip(), title, message, related_type, related_id),
+        (recipient, title, message, related_type, related_id),
     )
     conn.commit()
     conn.close()
@@ -922,7 +985,9 @@ def create_notification(recipient_code, title, message, related_type=None, relat
 def get_notifications(recipient_code, unread_only=False, limit=30):
     conn = get_connection()
     query = "SELECT * FROM notifications WHERE recipient_code = ?"
-    params = [(recipient_code or "").strip()]
+    recipient = (recipient_code or "").strip()
+    recipient = "ADMIN" if recipient.upper() == "ADMIN" else _normalize_employee_code(recipient)
+    params = [recipient]
     if unread_only:
         query += " AND is_read = 0"
     query += " ORDER BY created_at DESC LIMIT ?"
@@ -937,7 +1002,9 @@ def get_notification_log(recipient_code="ADMIN", related_type=None, limit=500):
     Admin 'who applied / who approved / who rejected' activity log)."""
     conn = get_connection()
     query = "SELECT * FROM notifications WHERE recipient_code = ?"
-    params = [(recipient_code or "").strip()]
+    recipient = (recipient_code or "").strip()
+    recipient = "ADMIN" if recipient.upper() == "ADMIN" else _normalize_employee_code(recipient)
+    params = [recipient]
     if related_type:
         query += " AND related_type = ?"
         params.append(related_type)
@@ -950,9 +1017,11 @@ def get_notification_log(recipient_code="ADMIN", related_type=None, limit=500):
 
 def unread_notification_count(recipient_code):
     conn = get_connection()
+    recipient = (recipient_code or "").strip()
+    recipient = "ADMIN" if recipient.upper() == "ADMIN" else _normalize_employee_code(recipient)
     row = conn.execute(
         "SELECT COUNT(*) as c FROM notifications WHERE recipient_code = ? AND is_read = 0",
-        ((recipient_code or "").strip(),),
+        (recipient,),
     ).fetchone()
     conn.close()
     return row["c"] if row else 0
@@ -967,7 +1036,9 @@ def mark_notification_read(notification_id: int):
 
 def mark_all_notifications_read(recipient_code):
     conn = get_connection()
-    conn.execute("UPDATE notifications SET is_read = 1 WHERE recipient_code = ?", ((recipient_code or "").strip(),))
+    recipient = (recipient_code or "").strip()
+    recipient = "ADMIN" if recipient.upper() == "ADMIN" else _normalize_employee_code(recipient)
+    conn.execute("UPDATE notifications SET is_read = 1 WHERE recipient_code = ?", (recipient,))
     conn.commit()
     conn.close()
 
@@ -991,18 +1062,11 @@ def get_announcements(limit=10):
 
 
 # ---------------------------------------------------------------------------
-# LOSS OF PAY (LOP) & EXTRA DAY RECORDS  [NEW]
+# LOSS OF PAY (LOP) & EXTRA DAY RECORDS
 # ---------------------------------------------------------------------------
-# Admin uploads (or manually enters) LOP records for employees who took leave
-# with no balance left / who are in the probation period, and EXTRA records
-# for employees who worked beyond the standard STANDARD_WORKING_DAYS-day
-# month. Both feed into generate_payroll() below, which converts the day
-# counts into a rupee amount using Gross / STANDARD_WORKING_DAYS as the
-# per-day rate, and stores everything on the payroll_records snapshot so it
-# shows up on the payslip.
 
 def add_lop_extra_record(employee_code, record_type, record_date, day_count, reason="", created_by=None):
-    code = (employee_code or "").strip()
+    code = _normalize_employee_code(employee_code)
     rtype = (record_type or "").strip().upper()
     if not code or rtype not in LOP_EXTRA_TYPES:
         return False
@@ -1034,7 +1098,7 @@ def bulk_upsert_lop_extra(rows, record_type, created_by=None):
     """rows: iterable of dicts with employee_code, date, reason, days."""
     ok, failed = 0, 0
     for r in rows:
-        code = str(r.get("employee_code", "")).strip()
+        code = _normalize_employee_code(r.get("employee_code", ""))
         rdate = str(r.get("date", "")).strip()
         reason = str(r.get("reason", "") or "")
         try:
@@ -1064,8 +1128,8 @@ def get_lop_extra_records(employee_code=None, month=None, year=None, record_type
     query = "SELECT * FROM lop_extra_records WHERE 1=1"
     params = []
     if employee_code:
-        query += " AND employee_code = ?"
-        params.append(employee_code)
+        query += " AND lower(trim(employee_code)) = lower(?)"
+        params.append(_normalize_employee_code(employee_code))
     if month:
         query += " AND month = ?"
         params.append(month)
@@ -1083,16 +1147,17 @@ def get_lop_extra_records(employee_code=None, month=None, year=None, record_type
 
 def get_lop_extra_summary(employee_code: str, month: int, year: int):
     """Returns total LOP days and total Extra days for one employee/month/year."""
+    code = _normalize_employee_code(employee_code)
     conn = get_connection()
     lop_row = conn.execute(
         "SELECT COALESCE(SUM(day_count),0) as total FROM lop_extra_records "
-        "WHERE employee_code = ? AND month = ? AND year = ? AND record_type = 'LOP'",
-        (employee_code, month, year),
+        "WHERE lower(trim(employee_code)) = lower(?) AND month = ? AND year = ? AND record_type = 'LOP'",
+        (code, month, year),
     ).fetchone()
     extra_row = conn.execute(
         "SELECT COALESCE(SUM(day_count),0) as total FROM lop_extra_records "
-        "WHERE employee_code = ? AND month = ? AND year = ? AND record_type = 'EXTRA'",
-        (employee_code, month, year),
+        "WHERE lower(trim(employee_code)) = lower(?) AND month = ? AND year = ? AND record_type = 'EXTRA'",
+        (code, month, year),
     ).fetchone()
     conn.close()
     return {"lop_days": lop_row["total"] or 0.0, "extra_days": extra_row["total"] or 0.0}
@@ -1127,16 +1192,13 @@ def _snapshot_from_employee(emp: dict):
 
 
 def generate_payroll(employee_code: str, month: int, year: int, generated_by: str = None):
-    emp = get_employee(employee_code)
+    code = _normalize_employee_code(employee_code)
+    emp = get_employee(code)
     if not emp:
         return False
     snap = _snapshot_from_employee(emp)
 
-    # ---- Loss of Pay (LOP) / Extra Day adjustment  [NEW] ----
-    # Per-day rate is based on Gross (Basic + DA + HRA + Phone + Others), NOT CTC,
-    # divided by the standard working-day count. LOP days are deducted at this
-    # rate; Extra days worked beyond the standard month are added at this rate.
-    lop_extra = get_lop_extra_summary(employee_code, month, year)
+    lop_extra = get_lop_extra_summary(code, month, year)
     lop_days = lop_extra["lop_days"]
     extra_days = lop_extra["extra_days"]
     per_day_rate = round(snap["gross"] / STANDARD_WORKING_DAYS, 2) if STANDARD_WORKING_DAYS else 0.0
@@ -1149,7 +1211,6 @@ def generate_payroll(employee_code: str, month: int, year: int, generated_by: st
     snap["extra_amount"] = extra_amount
     snap["per_day_rate"] = per_day_rate
     snap["net_pay"] = round(snap["net_pay"] - lop_amount + extra_amount, 2)
-    # ---- end LOP / Extra Day adjustment ----
 
     conn = get_connection()
     conn.execute(
@@ -1169,7 +1230,7 @@ def generate_payroll(employee_code: str, month: int, year: int, generated_by: st
                 extra_days=excluded.extra_days, extra_amount=excluded.extra_amount,
                 per_day_rate=excluded.per_day_rate,
                 generated_by=excluded.generated_by, generated_at=CURRENT_TIMESTAMP""",
-        (employee_code, month, year, snap["basic_pay"], snap["da"], snap["hra"], snap["phonebill_pay"],
+        (code, month, year, snap["basic_pay"], snap["da"], snap["hra"], snap["phonebill_pay"],
          snap["others"], snap["gross"], snap["employee_pf"], snap["employee_esic"],
          snap["employer_pf_total"], snap["employer_esic"], snap["ctc"], snap["net_pay"],
          snap["lop_days"], snap["lop_amount"], snap["extra_days"], snap["extra_amount"], snap["per_day_rate"],
@@ -1192,20 +1253,22 @@ def generate_payroll_for_all(month: int, year: int, generated_by: str = None, ac
 
 
 def get_payroll_record(employee_code: str, month: int, year: int):
+    code = _normalize_employee_code(employee_code)
     conn = get_connection()
     row = conn.execute(
-        "SELECT * FROM payroll_records WHERE employee_code = ? AND month = ? AND year = ?",
-        (employee_code, month, year),
+        "SELECT * FROM payroll_records WHERE lower(trim(employee_code)) = lower(?) AND month = ? AND year = ?",
+        (code, month, year),
     ).fetchone()
     conn.close()
     return dict(row) if row else None
 
 
 def get_payroll_months_for_employee(employee_code: str):
+    code = _normalize_employee_code(employee_code)
     conn = get_connection()
     rows = conn.execute(
-        "SELECT month, year FROM payroll_records WHERE employee_code = ? ORDER BY year DESC, month DESC",
-        (employee_code,),
+        "SELECT month, year FROM payroll_records WHERE lower(trim(employee_code)) = lower(?) ORDER BY year DESC, month DESC",
+        (code,),
     ).fetchall()
     conn.close()
     return [(r["month"], r["year"]) for r in rows]
@@ -1222,8 +1285,8 @@ def get_all_payroll_records(month=None, year=None, employee_code=None):
         query += " AND year = ?"
         params.append(year)
     if employee_code:
-        query += " AND employee_code = ?"
-        params.append(employee_code)
+        query += " AND lower(trim(employee_code)) = lower(?)"
+        params.append(_normalize_employee_code(employee_code))
     query += " ORDER BY year DESC, month DESC, employee_code"
     rows = conn.execute(query, params).fetchall()
     conn.close()

@@ -161,7 +161,7 @@ def generate_payslip_pdf(employee: dict, payroll: dict, company_name="TEC TANIVA
     story.append(Spacer(1, 14))
 
     # -----------------------------------------------------------------
-    # Attendance Adjustments: Loss of Pay (LOP) / Extra Days Worked [NEW]
+    # Attendance Adjustments: Loss of Pay (LOP) / Extra Days Worked
     # Only rendered when this payroll snapshot actually has LOP or Extra
     # day amounts recorded against it, so older/unaffected payslips are
     # completely unchanged.
