@@ -471,11 +471,19 @@ with tab_balances:
 
 # ===========================================================================
 # TAB: LEAVE APPROVALS
+#
+# CHANGE: Approvals now respect the employee's reporting boss. When a
+# request has a boss assigned, Admin only gets a read-only status here
+# ("Awaiting decision from reporting boss") — the boss decides it from
+# their own Employee Portal → Team Approvals tab. Admin can still act
+# directly on requests with NO boss assigned, and has an "HR Override"
+# expander for the rare case a boss is unavailable.
 # ===========================================================================
 with tab_leaves:
     st.subheader("Employee Leave Requests")
-    st.caption("Admin/HR can view and decide on every leave request across the company, "
-               "regardless of who the reporting boss is.")
+    st.caption("Requests from employees with a reporting boss are routed to that boss for approval first — "
+               "they'll decide it from their own portal's Team Approvals tab. Admin/HR only decides directly "
+               "when no reporting boss is assigned, or via HR Override below if the boss is unavailable.")
 
     all_counts = get_leave_request_counts()
     lc1, lc2, lc3 = st.columns(3)
@@ -498,22 +506,44 @@ with tab_leaves:
                 st.markdown(f"**{emp_r.get('employee_name', r['employee_code'])}** ({r['employee_code']}) · {ltype_label} · **{r['from_date']}** to **{r['to_date']}** ({r['days']:g} day(s))")
                 if r.get("reason"):
                     st.caption(f"Reason: {r['reason']}")
-                boss_label = r.get("boss_employee_code") or "— No boss assigned —"
-                st.caption(f"Reporting Boss: {boss_label} · Applied on: {r['applied_on']}")
+                boss_code = r.get("boss_employee_code")
+                boss_emp = get_employee(boss_code) if boss_code else None
+                boss_display = boss_emp["employee_name"] if boss_emp else (boss_code or "— No boss assigned —")
+                st.caption(f"Reporting Boss: {boss_display} · Applied on: {r['applied_on']}")
                 if r["status"] != "Pending":
                     st.caption(f"Decided by: {r.get('decided_by') or '—'} on {r.get('decided_at') or '—'}")
             with cB:
                 st.markdown(status_pill(r["status"]), unsafe_allow_html=True)
                 if r["status"] == "Pending":
-                    b1, b2 = st.columns(2)
-                    with b1:
-                        if st.button("✅", key=f"ap_{r['id']}", help="Approve"):
-                            decide_leave(r["id"], "Approved", decided_by=st.session_state.get("username"))
-                            st.rerun()
-                    with b2:
-                        if st.button("❌", key=f"rj_{r['id']}", help="Reject"):
-                            decide_leave(r["id"], "Rejected", decided_by=st.session_state.get("username"))
-                            st.rerun()
+                    if boss_code:
+                        # Boss-first workflow: Admin does not get direct
+                        # Approve/Reject buttons here for requests that
+                        # have a reporting boss. Only an explicit HR
+                        # Override (below) can bypass that.
+                        st.caption(f"⏳ Awaiting decision from **{boss_display}**")
+                        with st.expander("HR Override"):
+                            st.caption("Use only if the reporting boss is unavailable. This bypasses their approval.")
+                            ob1, ob2 = st.columns(2)
+                            with ob1:
+                                if st.button("✅ Approve", key=f"ov_ap_{r['id']}", help="HR Override — Approve"):
+                                    decide_leave(r["id"], "Approved", decided_by=st.session_state.get("username"))
+                                    st.rerun()
+                            with ob2:
+                                if st.button("❌ Reject", key=f"ov_rj_{r['id']}", help="HR Override — Reject"):
+                                    decide_leave(r["id"], "Rejected", decided_by=st.session_state.get("username"))
+                                    st.rerun()
+                    else:
+                        # No reporting boss on file — HR/Admin is the
+                        # rightful direct approver for this one.
+                        b1, b2 = st.columns(2)
+                        with b1:
+                            if st.button("✅", key=f"ap_{r['id']}", help="Approve"):
+                                decide_leave(r["id"], "Approved", decided_by=st.session_state.get("username"))
+                                st.rerun()
+                        with b2:
+                            if st.button("❌", key=f"rj_{r['id']}", help="Reject"):
+                                decide_leave(r["id"], "Rejected", decided_by=st.session_state.get("username"))
+                                st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
 
 # ===========================================================================
