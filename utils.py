@@ -11,7 +11,7 @@ import os
 import hmac
 import hashlib
 from datetime import datetime
-from database import authenticate_user, get_notifications, get_notification_log, unread_notification_count, mark_notification_read, mark_all_notifications_read
+from database import authenticate_user, get_notifications_with_unread_count, mark_notification_read, mark_all_notifications_read
 
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
 
@@ -453,14 +453,18 @@ def render_portal_sidebar(recipient_code, display_name, subtitle, photo_path=Non
 
 
 def render_notification_bell(recipient_code: str, key_prefix: str = "notif"):
-    """Renders a notification bell with unread badge in the sidebar."""
+    """Renders a notification bell with unread badge in the sidebar.
+
+    Uses get_notifications_with_unread_count() so this only checks out one
+    connection from the pool instead of two (it used to call
+    unread_notification_count() AND get_notifications() separately, on
+    every single page render)."""
     if not recipient_code:
         return
-    unread = unread_notification_count(recipient_code)
+    notifs, unread = get_notifications_with_unread_count(recipient_code, limit=20)
     with st.sidebar:
         label = f"🔔 Notifications ({unread} new)" if unread else "🔔 Notifications"
         with st.expander(label, expanded=False):
-            notifs = get_notifications(recipient_code, limit=20)
             if not notifs:
                 st.caption("You're all caught up — no notifications yet.")
             else:
