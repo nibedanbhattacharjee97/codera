@@ -170,15 +170,6 @@ def verify_password(password: str, stored_hash: str) -> tuple[bool, bool]:
 # DATABASE INITIALIZATION
 # ---------------------------------------------------------------------------
 def _run_init_db():
-    """The actual, expensive schema-creation work. This used to run on
-    EVERY Streamlit rerun (i.e. every single button click / tab switch /
-    form submit in admin.py and employee.py), which meant every click paid
-    for a full multi-statement DDL round trip to Postgres plus the
-    'CREATE TABLE IF NOT EXISTS' existence checks and an admin-user lookup.
-    Against a serverless Neon endpoint that adds up fast and was almost
-    certainly the main reason logins/clicks felt slow after the Postgres
-    migration. It's now wrapped by init_db() below so it only executes
-    once per running app process, not once per click."""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -352,14 +343,6 @@ def _run_init_db():
                     UNIQUE(employee_code, month, year, day)
                 );
 
-                -- ---------------------------------------------------------
-                -- Indexes: these tables get filtered by these columns on
-                -- almost every page load (leave approvals, payslips,
-                -- attendance, notification bell). Without them Postgres
-                -- falls back to sequential scans that get slower as the
-                -- tables grow, which compounds the "everything feels slow"
-                -- complaint over time.
-                -- ---------------------------------------------------------
                 CREATE INDEX IF NOT EXISTS idx_leave_requests_employee_code ON leave_requests(employee_code);
                 CREATE INDEX IF NOT EXISTS idx_leave_requests_boss_code ON leave_requests(boss_employee_code);
                 CREATE INDEX IF NOT EXISTS idx_leave_requests_status ON leave_requests(status);
@@ -385,10 +368,6 @@ def _run_init_db():
 
 @st.cache_resource
 def _init_db_cached():
-    """st.cache_resource means this body runs exactly once for the life of
-    the app process (shared across every user/session), no matter how many
-    times init_db() gets called from admin.py / employee.py on every rerun.
-    This is the main login/click speed fix."""
     _run_init_db()
     return True
 
@@ -819,15 +798,6 @@ def adjust_leave_balance(employee_code: str, leave_type: str, delta: float):
 
 # ---------------------------------------------------------------------------
 # LEAVE REQUEST WORKFLOW
-#
-# Approval order of precedence (enforced in the UI, admin.py / employee.py):
-#   1. If the employee has a reporting_boss_code set, ONLY that boss can
-#      approve/reject the request from their Team Approvals tab.
-#   2. Admin/HR can only decide a request directly when there is NO
-#      reporting boss assigned (boss_employee_code is NULL) — those go
-#      straight to HR. Admin still sees every request for visibility and
-#      has an explicit "HR Override" option for when a boss is
-#      unavailable, but it no longer bypasses the boss by default.
 # ---------------------------------------------------------------------------
 def apply_leave(employee_code, leave_type, from_date, to_date, days, reason):
     code = _normalize_employee_code(employee_code)
@@ -970,11 +940,6 @@ def get_notifications(recipient_code, unread_only=False, limit=30):
         release_connection(conn)
 
 def get_notifications_with_unread_count(recipient_code, limit=20):
-    """Combines what used to be two separate pool checkouts (get_notifications
-    + unread_notification_count) into a single connection checkout with two
-    queries on it. The sidebar bell calls this on every single page render
-    for every tab switch, so halving its connection-pool round trips is a
-    meaningful, low-risk speed win."""
     conn = get_connection()
     recipient = (recipient_code or "").strip()
     recipient = "ADMIN" if recipient.upper() == "ADMIN" else _normalize_employee_code(recipient)
@@ -986,11 +951,17 @@ def get_notifications_with_unread_count(recipient_code, limit=20):
             )
             notifs = [dict(r) for r in cur.fetchall()]
             cur.execute(
-                "SELECT COUNT(*) FROM notifications WHERE recipient_code = %s AND is_read = 0;",
+                "SELECT COUNT(*) AS unread_count FROM notifications WHERE recipient_code = %s AND is_read = 0;",
                 (recipient,)
             )
-            unread = cur.fetchone()[0]
-            return notifs, unread
+            row = cur.fetchone()
+            if not row:
+                unread = 0
+            elif isinstance(row, dict):
+                unread = row.get("unread_count", 0)
+            else:
+                unread = row[0]
+            return notifs, int(unread or 0)
     finally:
         release_connection(conn)
 
@@ -1002,7 +973,6 @@ def get_notification_log(recipient_code="ADMIN", related_type=None, limit=500):
     params = [recipient]
     if related_type:
         query += " AND related_type = %s"
-        params.append(related_type)
     query += " ORDER BY created_at DESC LIMIT %s;"
     params.append(limit)
     try:
