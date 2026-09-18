@@ -194,7 +194,7 @@ with tab_map["🗓️ Leave"]:
             with lc3: to_d = st.date_input("To Date", value=date.today())
             reason = st.text_area("Reason for Leave")
             if emp.get("reporting_boss_code"):
-                st.caption(f"This request will be routed to your reporting boss: **{emp.get('reporting_boss')}**")
+                st.caption(f"This request will be routed to your reporting boss: **{emp.get('reporting_boss')}** for approval first.")
             else:
                 st.caption("No reporting boss is assigned to you — this request will go directly to HR/Admin.")
             apply = st.form_submit_button("Submit Leave Request", use_container_width=True, type="primary")
@@ -238,11 +238,15 @@ with tab_map["🗓️ Leave"]:
 
 # ===========================================================================
 # TEAM APPROVALS (only shown to managers)
+#
+# This is the ONLY place a leave request with a reporting boss gets
+# approved/rejected by default (see admin.py's Leave Approvals tab, which
+# no longer bypasses this for requests that have a boss).
 # ===========================================================================
 if is_manager:
     with tab_map["✅ Team Approvals"]:
         st.subheader("Leave Requests From Your Team")
-        st.caption("You are the reporting boss for the employee(s) below.")
+        st.caption("You are the reporting boss for the employee(s) below — their leave requests come to you first.")
         team_codes = {m["employee_code"]: m["employee_name"] for m in team_members}
         st.markdown(", ".join(f"**{n}** ({c})" for c, n in team_codes.items()))
 
