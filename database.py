@@ -1,13 +1,14 @@
 """
 database.py
-Handles PostgreSQL database setup, connection pooling, and CRUD operations
-for TEC TANIVA HRMS across distributed Streamlit Cloud apps.
+PostgreSQL backend for TEC TANIVA HRMS.
+Handles SSL connections, Neon cold-starts, connection pooling, and CRUD.
 """
 
 import os
 import secrets
 import hashlib
 import hmac
+import time
 from datetime import datetime
 import psycopg2
 from psycopg2 import pool
@@ -33,11 +34,25 @@ DB_URL = _get_database_url()
 def get_connection_pool():
     if not DB_URL:
         raise ValueError("DATABASE_URL not configured. Please add it to Streamlit Secrets or Environment Variables.")
-    return psycopg2.pool.ThreadedConnectionPool(
-        minconn=1,
-        maxconn=20,
-        dsn=DB_URL
-    )
+    
+    dsn = DB_URL
+    # Ensure Neon doesn't drop cold-starts during serverless wakeups
+    if "connect_timeout" not in dsn:
+        dsn += ("&" if "?" in dsn else "?") + "connect_timeout=15"
+
+    # Retry up to 3 times to allow Neon compute to wake from 'Idle' state
+    last_err = None
+    for attempt in range(3):
+        try:
+            return psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=10,
+                dsn=dsn
+            )
+        except psycopg2.OperationalError as e:
+            last_err = e
+            time.sleep(2)
+    raise last_err
 
 def get_connection():
     cp = get_connection_pool()
@@ -53,7 +68,7 @@ def release_connection(conn):
         pass
 
 # ---------------------------------------------------------------------------
-# STATUTORY CONSTANTS (India - PF & ESI)
+# STATUTORY CONSTANTS (India - PF & ESI, FY 2026)
 # ---------------------------------------------------------------------------
 PF_WAGE_CEILING = 15000.0
 EPF_EMPLOYEE_RATE = 0.12
@@ -157,9 +172,7 @@ def init_db():
                     full_name TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-            """)
 
-            cur.execute("""
                 CREATE TABLE IF NOT EXISTS employees (
                     id SERIAL PRIMARY KEY,
                     employee_code TEXT UNIQUE NOT NULL,
@@ -220,9 +233,7 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-            """)
 
-            cur.execute("""
                 CREATE TABLE IF NOT EXISTS leave_requests (
                     id SERIAL PRIMARY KEY,
                     employee_code TEXT NOT NULL,
@@ -238,18 +249,14 @@ def init_db():
                     applied_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (employee_code) REFERENCES employees(employee_code) ON DELETE CASCADE
                 );
-            """)
 
-            cur.execute("""
                 CREATE TABLE IF NOT EXISTS announcements (
                     id SERIAL PRIMARY KEY,
                     title TEXT,
                     message TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-            """)
 
-            cur.execute("""
                 CREATE TABLE IF NOT EXISTS leave_balances (
                     id SERIAL PRIMARY KEY,
                     employee_code TEXT NOT NULL,
@@ -258,9 +265,7 @@ def init_db():
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(employee_code, leave_type)
                 );
-            """)
 
-            cur.execute("""
                 CREATE TABLE IF NOT EXISTS notifications (
                     id SERIAL PRIMARY KEY,
                     recipient_code TEXT NOT NULL,
@@ -271,9 +276,7 @@ def init_db():
                     is_read INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-            """)
 
-            cur.execute("""
                 CREATE TABLE IF NOT EXISTS payroll_records (
                     id SERIAL PRIMARY KEY,
                     employee_code TEXT NOT NULL,
@@ -302,9 +305,7 @@ def init_db():
                     generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(employee_code, month, year)
                 );
-            """)
 
-            cur.execute("""
                 CREATE TABLE IF NOT EXISTS lop_extra_records (
                     id SERIAL PRIMARY KEY,
                     employee_code TEXT NOT NULL,
@@ -318,9 +319,7 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (employee_code) REFERENCES employees(employee_code) ON DELETE CASCADE
                 );
-            """)
 
-            cur.execute("""
                 CREATE TABLE IF NOT EXISTS attendance_records (
                     id SERIAL PRIMARY KEY,
                     employee_code TEXT NOT NULL,
