@@ -1,58 +1,59 @@
 """
 database.py
-Handles SQLite database setup, connections, and CRUD operations
-for TEC TANIVA HRMS.
-
-FIX APPLIED (see _normalize_employee_code below): every place that reads
-or writes an `employee_code` now goes through the same trim+uppercase
-normalization. Previously, functions like get_user_by_employee_code()
-already did this (via lower(trim(...))), but the leave_balances,
-lop_extra_records, leave_requests and payroll_records helpers did NOT -
-they used exact string matching. That meant a manually-typed or
-Excel-bulk-uploaded employee_code that differed only in case or
-whitespace (very easy to happen from an .xlsx export) would silently
-save under a *different* key than the one the Employee Portal looks
-up, so updates made in Admin never appeared for the employee even
-though the row really was written to the database.
-
-UPDATE (this revision):
-  - Added bank_name / ifsc_code / blood_group to the employee master.
-  - Added a proper monthly Attendance engine (attendance_records table)
-    that replaces manual Loss-of-Pay entry as the primary way to drive
-    payroll deductions/extra-day pay. The old lop_extra_records path is
-    kept for backward compatibility but payroll now prefers attendance
-    data for a month whenever it exists.
-  - decide_leave() now also notifies the reporting boss (not just the
-    employee and ADMIN) so nobody is left out of the loop.
+Handles PostgreSQL database setup, connection pooling, and CRUD operations
+for TEC TANIVA HRMS across distributed Streamlit Cloud apps.
 """
 
-import sqlite3
-import hashlib
 import os
 import secrets
+import hashlib
 import hmac
-from datetime import datetime, date
+from datetime import datetime
+import psycopg2
+from psycopg2 import pool
+from psycopg2.extras import RealDictCursor
+import streamlit as st
 
 # ---------------------------------------------------------------------------
-# SINGLE SHARED DATABASE
+# POSTGRESQL CONNECTION POOL SETUP
 # ---------------------------------------------------------------------------
-LOCAL_DB_DIR = os.path.join(os.path.dirname(__file__), "database")
-os.makedirs(LOCAL_DB_DIR, exist_ok=True)
-LOCAL_DB_PATH = os.path.join(LOCAL_DB_DIR, "hr_system.db")
-SHARED_DB_DIR = os.path.join(os.path.expanduser("~"), ".tec_taniva_hrms")
-os.makedirs(SHARED_DB_DIR, exist_ok=True)
-SHARED_DB_PATH = os.path.join(SHARED_DB_DIR, "hr_system.db")
-DB_PATH = os.environ.get("HRMS_DB_PATH", LOCAL_DB_PATH)
+def _get_database_url() -> str:
+    # Priority 1: Streamlit Secrets
+    if hasattr(st, "secrets"):
+        if "postgres" in st.secrets and "url" in st.secrets["postgres"]:
+            return st.secrets["postgres"]["url"]
+        if "DATABASE_URL" in st.secrets:
+            return st.secrets["DATABASE_URL"]
+    # Priority 2: OS Environment Variable
+    return os.environ.get("DATABASE_URL", "")
 
-if not os.path.exists(DB_PATH) and DB_PATH == SHARED_DB_PATH and os.path.exists(LOCAL_DB_PATH):
+DB_URL = _get_database_url()
+
+@st.cache_resource
+def get_connection_pool():
+    if not DB_URL:
+        raise ValueError("DATABASE_URL not configured. Please add it to Streamlit Secrets or Environment Variables.")
+    return psycopg2.pool.ThreadedConnectionPool(
+        minconn=1,
+        maxconn=20,
+        dsn=DB_URL
+    )
+
+def get_connection():
+    cp = get_connection_pool()
+    conn = cp.getconn()
+    conn.autocommit = False
+    return conn
+
+def release_connection(conn):
     try:
-        import shutil
-        shutil.copy2(LOCAL_DB_PATH, DB_PATH)
-    except OSError:
+        cp = get_connection_pool()
+        cp.putconn(conn)
+    except Exception:
         pass
 
 # ---------------------------------------------------------------------------
-# STATUTORY CONSTANTS (India - PF & ESI, FY 2026)
+# STATUTORY CONSTANTS (India - PF & ESI)
 # ---------------------------------------------------------------------------
 PF_WAGE_CEILING = 15000.0
 EPF_EMPLOYEE_RATE = 0.12
@@ -80,9 +81,6 @@ LEAVE_TYPES = list(LEAVE_TYPE_LABELS.keys())
 MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
                "July", "August", "September", "October", "November", "December"]
 
-# ---------------------------------------------------------------------------
-# LOSS OF PAY (LOP) / EXTRA DAY CONSTANTS  (legacy manual-entry path)
-# ---------------------------------------------------------------------------
 STANDARD_WORKING_DAYS = 26
 LOP_EXTRA_TYPES = ["LOP", "EXTRA"]
 LOP_EXTRA_TYPE_LABELS = {
@@ -90,10 +88,6 @@ LOP_EXTRA_TYPE_LABELS = {
     "EXTRA": "Extra Day Worked",
 }
 
-# ---------------------------------------------------------------------------
-# MONTHLY ATTENDANCE CONSTANTS  (new primary payroll-driver)
-# ---------------------------------------------------------------------------
-# Status codes accepted in the attendance grid / bulk-upload sheet.
 ATTENDANCE_STATUS_LABELS = {
     "P":  "Present",
     "A":  "Absent (Loss of Pay - full day)",
@@ -104,39 +98,22 @@ ATTENDANCE_STATUS_LABELS = {
     "EX": "Extra Day Worked (paid on top of gross)",
 }
 ATTENDANCE_STATUS_CODES = list(ATTENDANCE_STATUS_LABELS.keys())
-# Codes that count as a full Loss-of-Pay day / half Loss-of-Pay day.
 LOP_FULL_CODES = {"A"}
 LOP_HALF_CODES = {"HD"}
 EXTRA_CODES = {"EX"}
-# Codes that count towards "present" for the summary card.
 PRESENT_CODES = {"P", "EX"}
 
-
-def get_connection():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
-
-
+# ---------------------------------------------------------------------------
+# HELPERS & AUTH
+# ---------------------------------------------------------------------------
 def _normalize_username(username: str) -> str:
     return (username or "").strip().lower()
 
-
 def _normalize_employee_code(code) -> str:
-    """Canonical form for every employee_code stored or looked up
-    anywhere in the app: trimmed, upper-cased. Applying this in ONE
-    place, and calling it from every read/write path below, is what
-    guarantees Admin-side edits (manual entry, bulk CSV/Excel upload,
-    onboarding) always land under the exact same key the Employee
-    Portal queries with - regardless of stray spaces or case coming
-    from a spreadsheet."""
-    return (code or "").strip().upper()
-
+    return (str(code) if code is not None else "").strip().upper()
 
 def _clean_password(password: str) -> str:
     return (password or "").strip()
-
 
 def hash_password(password: str) -> str:
     raw = _clean_password(password).encode("utf-8")
@@ -144,7 +121,6 @@ def hash_password(password: str) -> str:
     iterations = 310_000
     digest = hashlib.pbkdf2_hmac("sha256", raw, salt, iterations)
     return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
-
 
 def verify_password(password: str, stored_hash: str) -> tuple[bool, bool]:
     password = _clean_password(password)
@@ -164,410 +140,287 @@ def verify_password(password: str, stored_hash: str) -> tuple[bool, bool]:
     legacy = hashlib.sha256(password.encode("utf-8")).hexdigest()
     return hmac.compare_digest(legacy, stored_hash), True
 
-
-def _ensure_column(cur, table, column, coltype_and_default):
-    cur.execute(f"PRAGMA table_info({table})")
-    existing = {row[1] for row in cur.fetchall()}
-    if column not in existing:
-        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype_and_default}")
-
-
-def _bootstrap_employees_from_excel(conn):
-    if not os.path.exists(os.path.join(os.path.dirname(__file__), "data.xlsx")):
-        return 0
-    try:
-        import pandas as pd
-        xls = pd.ExcelFile(os.path.join(os.path.dirname(__file__), "data.xlsx"))
-        sheet = xls.sheet_names[0]
-        df = pd.read_excel(os.path.join(os.path.dirname(__file__), "data.xlsx"), sheet_name=sheet)
-    except Exception:
-        return 0
-    if "employee_code" not in df.columns or "employee_name" not in df.columns:
-        return 0
-    imported = 0
-    for _, r in df.iterrows():
-        code = _normalize_employee_code(r.get("employee_code", ""))
-        name = str(r.get("employee_name", "")).strip()
-        if not code or not name or code.lower() == "nan":
-            continue
-        exists = conn.execute("SELECT id FROM employees WHERE lower(trim(employee_code))=lower(?) LIMIT 1", (code,)).fetchone()
-        if not exists:
-            cols = []
-            vals = []
-            for c in df.columns:
-                if c == "employee_code":
-                    val = code
-                elif c == "employee_name":
-                    val = name
-                else:
-                    val = r.get(c)
-                    if pd.isna(val):
-                        val = None
-                    elif hasattr(val, "date"):
-                        val = str(val.date())
-                    else:
-                        val = str(val) if not isinstance(val, (int, float)) else val
-                if c in {"employee_code", "employee_name", "dob", "highest_qualification", "date_of_joining", "designation", "reporting_boss", "mobile_number", "uan_number", "esic_number", "employee_type", "emergency_contact_number", "email", "place", "basic_pay", "hra", "phonebill_pay", "others", "pf", "esic_if_applicable", "food_reimbursement", "ctc"}:
-                    cols.append(c); vals.append(val)
-            try:
-                placeholders = ", ".join(["?"] * len(cols))
-                conn.execute(f"INSERT INTO employees ({', '.join(cols)}) VALUES ({placeholders})", vals)
-                imported += 1
-            except Exception:
-                continue
-    conn.commit()
-    employees = conn.execute("SELECT employee_code, employee_name FROM employees").fetchall()
-    for emp in employees:
-        code = _normalize_employee_code(emp["employee_code"])
-        user = conn.execute("SELECT id FROM users WHERE lower(trim(employee_code))=lower(?) AND role='employee' LIMIT 1", (code,)).fetchone()
-        if not user:
-            taken = conn.execute("SELECT id FROM users WHERE username=? LIMIT 1", (code.lower(),)).fetchone()
-            if not taken:
-                conn.execute("INSERT INTO users (username,password_hash,role,employee_code,full_name) VALUES (?,?,?,?,?)", (code.lower(), hash_password("Welcome@123"), "employee", emp["employee_code"], emp["employee_name"]))
-    conn.commit()
-    return imported
-
-
+# ---------------------------------------------------------------------------
+# DATABASE INITIALIZATION
+# ---------------------------------------------------------------------------
 def init_db():
     conn = get_connection()
-    cur = conn.cursor()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    username TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('admin', 'employee')),
+                    employee_code TEXT,
+                    full_name TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL CHECK(role IN ('admin', 'employee')),
-            employee_code TEXT,
-            full_name TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS employees (
+                    id SERIAL PRIMARY KEY,
+                    employee_code TEXT UNIQUE NOT NULL,
+                    employee_name TEXT NOT NULL,
+                    dob TEXT,
+                    highest_qualification TEXT,
+                    date_of_joining TEXT,
+                    designation TEXT,
+                    reporting_boss TEXT,
+                    reporting_boss_code TEXT,
+                    mobile_number TEXT,
+                    uan_number TEXT,
+                    esic_number TEXT,
+                    employee_type TEXT CHECK(employee_type IN ('Probation', 'Permanent')),
+                    emergency_contact_number TEXT,
+                    email TEXT,
+                    place TEXT,
+                    bank_name TEXT,
+                    ifsc_code TEXT,
+                    blood_group TEXT,
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS employees (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_code TEXT UNIQUE NOT NULL,
-            employee_name TEXT NOT NULL,
-            dob TEXT,
-            highest_qualification TEXT,
-            date_of_joining TEXT,
-            designation TEXT,
-            reporting_boss TEXT,
-            mobile_number TEXT,
-            uan_number TEXT,
-            esic_number TEXT,
-            employee_type TEXT CHECK(employee_type IN ('Probation', 'Permanent')),
-            emergency_contact_number TEXT,
-            email TEXT,
-            place TEXT,
+                    pic_path TEXT,
+                    id_card_path TEXT,
+                    certificate_path TEXT,
+                    cv_path TEXT,
+                    extra_doc1_path TEXT,
+                    extra_doc2_path TEXT,
+                    extra_doc3_path TEXT,
+                    extra_doc4_path TEXT,
 
-            pic_path TEXT,
-            id_card_path TEXT,
-            certificate_path TEXT,
-            cv_path TEXT,
-            extra_doc1_path TEXT,
-            extra_doc2_path TEXT,
-            extra_doc3_path TEXT,
-            extra_doc4_path TEXT,
+                    basic_pay DOUBLE PRECISION DEFAULT 0,
+                    da DOUBLE PRECISION DEFAULT 0,
+                    hra DOUBLE PRECISION DEFAULT 0,
+                    phonebill_pay DOUBLE PRECISION DEFAULT 0,
+                    others DOUBLE PRECISION DEFAULT 0,
 
-            basic_pay REAL DEFAULT 0,
-            da REAL DEFAULT 0,
-            hra REAL DEFAULT 0,
-            phonebill_pay REAL DEFAULT 0,
-            others REAL DEFAULT 0,
+                    pf_basis TEXT CHECK(pf_basis IN ('capped', 'actual')) DEFAULT 'capped',
+                    pf_wage DOUBLE PRECISION DEFAULT 0,
+                    pf DOUBLE PRECISION DEFAULT 0,
+                    employer_pf DOUBLE PRECISION DEFAULT 0,
+                    employer_eps DOUBLE PRECISION DEFAULT 0,
+                    employer_edli DOUBLE PRECISION DEFAULT 0,
+                    employer_admin_charges DOUBLE PRECISION DEFAULT 0,
+                    employer_pf_total DOUBLE PRECISION DEFAULT 0,
 
-            pf_basis TEXT CHECK(pf_basis IN ('capped', 'actual')) DEFAULT 'capped',
-            pf_wage REAL DEFAULT 0,
-            pf REAL DEFAULT 0,
-            employer_pf REAL DEFAULT 0,
-            employer_eps REAL DEFAULT 0,
-            employer_edli REAL DEFAULT 0,
-            employer_admin_charges REAL DEFAULT 0,
-            employer_pf_total REAL DEFAULT 0,
+                    is_pwd INTEGER DEFAULT 0,
+                    esic_if_applicable TEXT CHECK(esic_if_applicable IN ('Yes', 'No')) DEFAULT 'No',
+                    esic_wage_ceiling_used DOUBLE PRECISION DEFAULT 0,
+                    esic_eligible_by_wage INTEGER DEFAULT 0,
+                    employer_esic DOUBLE PRECISION DEFAULT 0,
+                    employee_esic DOUBLE PRECISION DEFAULT 0,
 
-            is_pwd INTEGER DEFAULT 0,
-            esic_if_applicable TEXT CHECK(esic_if_applicable IN ('Yes', 'No')) DEFAULT 'No',
-            esic_wage_ceiling_used REAL DEFAULT 0,
-            esic_eligible_by_wage INTEGER DEFAULT 0,
-            employer_esic REAL DEFAULT 0,
-            employee_esic REAL DEFAULT 0,
+                    food_reimbursement TEXT CHECK(food_reimbursement IN ('Yes', 'No')) DEFAULT 'No',
+                    ctc DOUBLE PRECISION DEFAULT 0,
 
-            food_reimbursement TEXT CHECK(food_reimbursement IN ('Yes', 'No')) DEFAULT 'No',
-            ctc REAL DEFAULT 0,
+                    leave_balance DOUBLE PRECISION DEFAULT 12,
+                    status TEXT DEFAULT 'Active',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
-            leave_balance REAL DEFAULT 12,
-            status TEXT DEFAULT 'Active',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS leave_requests (
+                    id SERIAL PRIMARY KEY,
+                    employee_code TEXT NOT NULL,
+                    leave_type TEXT,
+                    from_date TEXT,
+                    to_date TEXT,
+                    days DOUBLE PRECISION,
+                    reason TEXT,
+                    status TEXT DEFAULT 'Pending',
+                    boss_employee_code TEXT,
+                    decided_by TEXT,
+                    decided_at TIMESTAMP,
+                    applied_on TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (employee_code) REFERENCES employees(employee_code) ON DELETE CASCADE
+                );
+            """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS leave_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_code TEXT NOT NULL,
-            leave_type TEXT,
-            from_date TEXT,
-            to_date TEXT,
-            days REAL,
-            reason TEXT,
-            status TEXT DEFAULT 'Pending',
-            boss_employee_code TEXT,
-            decided_by TEXT,
-            decided_at TEXT,
-            applied_on TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (employee_code) REFERENCES employees(employee_code) ON DELETE CASCADE
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS announcements (
+                    id SERIAL PRIMARY KEY,
+                    title TEXT,
+                    message TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS announcements (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
-            message TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS leave_balances (
+                    id SERIAL PRIMARY KEY,
+                    employee_code TEXT NOT NULL,
+                    leave_type TEXT NOT NULL,
+                    balance DOUBLE PRECISION DEFAULT 0,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(employee_code, leave_type)
+                );
+            """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS leave_balances (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_code TEXT NOT NULL,
-            leave_type TEXT NOT NULL,
-            balance REAL DEFAULT 0,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(employee_code, leave_type)
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id SERIAL PRIMARY KEY,
+                    recipient_code TEXT NOT NULL,
+                    title TEXT,
+                    message TEXT,
+                    related_type TEXT,
+                    related_id INTEGER,
+                    is_read INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            recipient_code TEXT NOT NULL,
-            title TEXT,
-            message TEXT,
-            related_type TEXT,
-            related_id INTEGER,
-            is_read INTEGER DEFAULT 0,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS payroll_records (
+                    id SERIAL PRIMARY KEY,
+                    employee_code TEXT NOT NULL,
+                    month INTEGER NOT NULL,
+                    year INTEGER NOT NULL,
+                    basic_pay DOUBLE PRECISION DEFAULT 0,
+                    da DOUBLE PRECISION DEFAULT 0,
+                    hra DOUBLE PRECISION DEFAULT 0,
+                    phonebill_pay DOUBLE PRECISION DEFAULT 0,
+                    others DOUBLE PRECISION DEFAULT 0,
+                    gross DOUBLE PRECISION DEFAULT 0,
+                    employee_pf DOUBLE PRECISION DEFAULT 0,
+                    employee_esic DOUBLE PRECISION DEFAULT 0,
+                    employer_pf_total DOUBLE PRECISION DEFAULT 0,
+                    employer_esic DOUBLE PRECISION DEFAULT 0,
+                    ctc DOUBLE PRECISION DEFAULT 0,
+                    net_pay DOUBLE PRECISION DEFAULT 0,
+                    lop_days DOUBLE PRECISION DEFAULT 0,
+                    lop_amount DOUBLE PRECISION DEFAULT 0,
+                    extra_days DOUBLE PRECISION DEFAULT 0,
+                    extra_amount DOUBLE PRECISION DEFAULT 0,
+                    per_day_rate DOUBLE PRECISION DEFAULT 0,
+                    present_days DOUBLE PRECISION DEFAULT 0,
+                    source TEXT DEFAULT 'manual',
+                    generated_by TEXT,
+                    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(employee_code, month, year)
+                );
+            """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS payroll_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_code TEXT NOT NULL,
-            month INTEGER NOT NULL,
-            year INTEGER NOT NULL,
-            basic_pay REAL DEFAULT 0,
-            da REAL DEFAULT 0,
-            hra REAL DEFAULT 0,
-            phonebill_pay REAL DEFAULT 0,
-            others REAL DEFAULT 0,
-            gross REAL DEFAULT 0,
-            employee_pf REAL DEFAULT 0,
-            employee_esic REAL DEFAULT 0,
-            employer_pf_total REAL DEFAULT 0,
-            employer_esic REAL DEFAULT 0,
-            ctc REAL DEFAULT 0,
-            net_pay REAL DEFAULT 0,
-            generated_by TEXT,
-            generated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(employee_code, month, year)
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS lop_extra_records (
+                    id SERIAL PRIMARY KEY,
+                    employee_code TEXT NOT NULL,
+                    record_type TEXT NOT NULL CHECK(record_type IN ('LOP', 'EXTRA')),
+                    record_date TEXT NOT NULL,
+                    day_count DOUBLE PRECISION NOT NULL DEFAULT 1,
+                    reason TEXT,
+                    month INTEGER NOT NULL,
+                    year INTEGER NOT NULL,
+                    created_by TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (employee_code) REFERENCES employees(employee_code) ON DELETE CASCADE
+                );
+            """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS lop_extra_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_code TEXT NOT NULL,
-            record_type TEXT NOT NULL CHECK(record_type IN ('LOP', 'EXTRA')),
-            record_date TEXT NOT NULL,
-            day_count REAL NOT NULL DEFAULT 1,
-            reason TEXT,
-            month INTEGER NOT NULL,
-            year INTEGER NOT NULL,
-            created_by TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (employee_code) REFERENCES employees(employee_code) ON DELETE CASCADE
-        )
-    """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS attendance_records (
+                    id SERIAL PRIMARY KEY,
+                    employee_code TEXT NOT NULL,
+                    month INTEGER NOT NULL,
+                    year INTEGER NOT NULL,
+                    day INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    created_by TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(employee_code, month, year, day)
+                );
+            """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS attendance_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            employee_code TEXT NOT NULL,
-            month INTEGER NOT NULL,
-            year INTEGER NOT NULL,
-            day INTEGER NOT NULL,
-            status TEXT NOT NULL,
-            created_by TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(employee_code, month, year, day)
-        )
-    """)
-
-    conn.commit()
-
-    for col, decl in [
-        ("da", "REAL DEFAULT 0"),
-        ("pf_basis", "TEXT DEFAULT 'capped'"),
-        ("pf_wage", "REAL DEFAULT 0"),
-        ("pf", "REAL DEFAULT 0"),
-        ("employer_pf", "REAL DEFAULT 0"),
-        ("employer_eps", "REAL DEFAULT 0"),
-        ("employer_edli", "REAL DEFAULT 0"),
-        ("employer_admin_charges", "REAL DEFAULT 0"),
-        ("employer_pf_total", "REAL DEFAULT 0"),
-        ("is_pwd", "INTEGER DEFAULT 0"),
-        ("esic_wage_ceiling_used", "REAL DEFAULT 0"),
-        ("esic_eligible_by_wage", "INTEGER DEFAULT 0"),
-        ("employer_esic", "REAL DEFAULT 0"),
-        ("employee_esic", "REAL DEFAULT 0"),
-        ("reporting_boss_code", "TEXT"),
-        ("bank_name", "TEXT"),
-        ("ifsc_code", "TEXT"),
-        ("blood_group", "TEXT"),
-    ]:
-        _ensure_column(cur, "employees", col, decl)
-
-    for col, decl in [
-        ("boss_employee_code", "TEXT"),
-        ("decided_by", "TEXT"),
-        ("decided_at", "TEXT"),
-    ]:
-        _ensure_column(cur, "leave_requests", col, decl)
-    conn.commit()
-
-    for col, decl in [
-        ("lop_days", "REAL DEFAULT 0"),
-        ("lop_amount", "REAL DEFAULT 0"),
-        ("extra_days", "REAL DEFAULT 0"),
-        ("extra_amount", "REAL DEFAULT 0"),
-        ("per_day_rate", "REAL DEFAULT 0"),
-        ("present_days", "REAL DEFAULT 0"),
-        ("source", "TEXT DEFAULT 'manual'"),
-    ]:
-        _ensure_column(cur, "payroll_records", col, decl)
-    conn.commit()
-
-    cur.execute("SELECT id, username FROM users")
-    for row in cur.fetchall():
-        normalized = _normalize_username(row["username"])
-        if normalized != row["username"]:
-            cur.execute("UPDATE users SET username = ? WHERE id = ?", (normalized, row["id"]))
-    conn.commit()
-
-    # ---- One-time cleanup: normalize any employee_code values that were
-    # stored before this fix (stray spaces / lowercase from old bulk
-    # uploads) so existing data self-heals on the next app start. ----
-    cur.execute("SELECT id, employee_code FROM employees")
-    for row in cur.fetchall():
-        norm = _normalize_employee_code(row["employee_code"])
-        if norm != row["employee_code"]:
-            cur.execute("UPDATE employees SET employee_code = ? WHERE id = ?", (norm, row["id"]))
-    for table in ("leave_balances", "leave_requests", "lop_extra_records", "payroll_records", "attendance_records"):
-        cur.execute(f"SELECT id, employee_code FROM {table}")
-        for row in cur.fetchall():
-            norm = _normalize_employee_code(row["employee_code"])
-            if norm != row["employee_code"]:
-                cur.execute(f"UPDATE {table} SET employee_code = ? WHERE id = ?", (norm, row["id"]))
-    cur.execute("SELECT id, employee_code FROM users WHERE employee_code IS NOT NULL")
-    for row in cur.fetchall():
-        norm = _normalize_employee_code(row["employee_code"])
-        if norm != row["employee_code"]:
-            cur.execute("UPDATE users SET employee_code = ? WHERE id = ?", (norm, row["id"]))
-    conn.commit()
-
-    cur.execute("SELECT COUNT(*) as c FROM users WHERE role = 'admin'")
-    if cur.fetchone()["c"] == 0:
-        cur.execute(
-            "INSERT INTO users (username, password_hash, role, full_name) VALUES (?, ?, ?, ?)",
-            (_normalize_username("admin"), hash_password("admin123"), "admin", "HR Administrator"),
-        )
-        conn.commit()
-
-    _bootstrap_employees_from_excel(conn)
-    conn.close()
-
+            cur.execute("SELECT COUNT(*) FROM users WHERE role = 'admin';")
+            if cur.fetchone()[0] == 0:
+                cur.execute(
+                    "INSERT INTO users (username, password_hash, role, full_name) VALUES (%s, %s, %s, %s);",
+                    (_normalize_username("admin"), hash_password("admin123"), "admin", "HR Administrator")
+                )
+            conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise e
+    finally:
+        release_connection(conn)
 
 # ---------------------------------------------------------------------------
-# AUTH
+# AUTHENTICATION
 # ---------------------------------------------------------------------------
-
 def authenticate_user(username: str, password: str):
     uname = _normalize_username(username)
     conn = get_connection()
-    row = conn.execute("SELECT * FROM users WHERE username = ? LIMIT 1", (uname,)).fetchone()
-    if not row:
-        conn.close()
-        return None
-
-    valid, legacy = verify_password(password, row["password_hash"])
-    if not valid:
-        conn.close()
-        return None
-
-    if legacy:
-        conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(password), row["id"]))
-        conn.commit()
-        row = conn.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone()
-
-    result = dict(row)
-    conn.close()
-    return result
-
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM users WHERE username = %s LIMIT 1;", (uname,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            valid, legacy = verify_password(password, row["password_hash"])
+            if not valid:
+                return None
+            if legacy:
+                cur.execute("UPDATE users SET password_hash = %s WHERE id = %s;", (hash_password(password), row["id"]))
+                conn.commit()
+            return dict(row)
+    finally:
+        release_connection(conn)
 
 def create_user(username, password, role, employee_code=None, full_name=None):
     conn = get_connection()
-    cur = conn.cursor()
     uname = _normalize_username(username)
     code = _normalize_employee_code(employee_code) if employee_code else None
     try:
-        cur.execute(
-            """INSERT INTO users (username, password_hash, role, employee_code, full_name)
-               VALUES (?, ?, ?, ?, ?)""",
-            (uname, hash_password(password), role, code, full_name),
-        )
-        conn.commit()
-        return True
-    except sqlite3.IntegrityError as e:
-        print(f"DB Error: {e}")
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO users (username, password_hash, role, employee_code, full_name) VALUES (%s, %s, %s, %s, %s);",
+                (uname, hash_password(password), role, code, full_name)
+            )
+            conn.commit()
+            return True
+    except psycopg2.IntegrityError:
+        conn.rollback()
         return False
     finally:
-        conn.close()
-
+        release_connection(conn)
 
 def username_exists(username: str) -> bool:
     conn = get_connection()
-    row = conn.execute(
-        "SELECT 1 FROM users WHERE username = ?", (_normalize_username(username),)
-    ).fetchone()
-    conn.close()
-    return row is not None
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM users WHERE username = %s LIMIT 1;", (_normalize_username(username),))
+            return cur.fetchone() is not None
+    finally:
+        release_connection(conn)
 
 def change_password(username: str, new_password: str):
     conn = get_connection()
-    conn.execute(
-        "UPDATE users SET password_hash = ? WHERE username = ?",
-        (hash_password(new_password), _normalize_username(username)),
-    )
-    conn.commit()
-    conn.close()
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET password_hash = %s WHERE username = %s;",
+                (hash_password(new_password), _normalize_username(username))
+            )
+            conn.commit()
+    finally:
+        release_connection(conn)
 
 def get_user_by_employee_code(employee_code: str, role: str = "employee"):
     conn = get_connection()
     code = _normalize_employee_code(employee_code)
-    row = conn.execute(
-        "SELECT * FROM users WHERE lower(trim(employee_code)) = lower(?) AND role = ? ORDER BY id DESC LIMIT 1",
-        (code, role),
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
-
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM users WHERE LOWER(TRIM(employee_code)) = LOWER(%s) AND role = %s ORDER BY id DESC LIMIT 1;",
+                (code, role)
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+    finally:
+        release_connection(conn)
 
 def reset_employee_password(employee_code: str, new_password: str):
     code = _normalize_employee_code(employee_code)
@@ -575,63 +428,69 @@ def reset_employee_password(employee_code: str, new_password: str):
         return None
 
     conn = get_connection()
-    emp = conn.execute("SELECT employee_code, employee_name FROM employees WHERE lower(trim(employee_code)) = lower(?) LIMIT 1", (code,)).fetchone()
-    if not emp:
-        conn.close()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT employee_code, employee_name FROM employees WHERE LOWER(TRIM(employee_code)) = LOWER(%s) LIMIT 1;", (code,))
+            emp = cur.fetchone()
+            if not emp:
+                return None
+
+            cur.execute("SELECT * FROM users WHERE LOWER(TRIM(employee_code)) = LOWER(%s) AND role = 'employee' ORDER BY id DESC LIMIT 1;", (code,))
+            user = cur.fetchone()
+            if user:
+                username = _normalize_username(user["username"])
+                cur.execute(
+                    "UPDATE users SET username = %s, password_hash = %s, full_name = %s, employee_code = %s WHERE id = %s;",
+                    (username, hash_password(new_password), emp["employee_name"], code, user["id"])
+                )
+            else:
+                username = _normalize_username(code)
+                cur.execute("SELECT id FROM users WHERE username = %s LIMIT 1;", (username,))
+                if cur.fetchone():
+                    return None
+                cur.execute(
+                    "INSERT INTO users (username, password_hash, role, employee_code, full_name) VALUES (%s, %s, 'employee', %s, %s);",
+                    (username, hash_password(new_password), code, emp["employee_name"])
+                )
+            conn.commit()
+            return username
+    except Exception:
+        conn.rollback()
         return None
-
-    user = conn.execute(
-        "SELECT * FROM users WHERE lower(trim(employee_code)) = lower(?) AND role = 'employee' ORDER BY id DESC LIMIT 1",
-        (code,),
-    ).fetchone()
-
-    if user:
-        username = _normalize_username(user["username"])
-        conn.execute(
-            "UPDATE users SET username = ?, password_hash = ?, full_name = ?, employee_code = ? WHERE id = ?",
-            (username, hash_password(new_password), emp["employee_name"], code, user["id"]),
-        )
-    else:
-        username = _normalize_username(code)
-        taken = conn.execute("SELECT id FROM users WHERE username = ? LIMIT 1", (username,)).fetchone()
-        if taken:
-            conn.close()
-            return None
-        conn.execute(
-            "INSERT INTO users (username, password_hash, role, employee_code, full_name) VALUES (?, ?, 'employee', ?, ?)",
-            (username, hash_password(new_password), code, emp["employee_name"]),
-        )
-
-    conn.commit()
-    conn.close()
-    return username
-
+    finally:
+        release_connection(conn)
 
 def get_database_info():
     conn = get_connection()
-    user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    employee_count_value = conn.execute("SELECT COUNT(*) FROM employees").fetchone()[0]
-    employee_login_count = conn.execute("SELECT COUNT(*) FROM users WHERE role='employee'").fetchone()[0]
-    conn.close()
-    return {
-        "path": DB_PATH,
-        "user_count": user_count,
-        "employee_count": employee_count_value,
-        "employee_login_count": employee_login_count,
-    }
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM users;")
+            u_count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM employees;")
+            e_count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM users WHERE role='employee';")
+            el_count = cur.fetchone()[0]
+            return {
+                "path": "PostgreSQL Remote DB",
+                "user_count": u_count,
+                "employee_count": e_count,
+                "employee_login_count": el_count,
+            }
+    finally:
+        release_connection(conn)
 
 def delete_user_login(username: str):
     conn = get_connection()
-    conn.execute("DELETE FROM users WHERE username = ?", (_normalize_username(username),))
-    conn.commit()
-    conn.close()
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM users WHERE username = %s;", (_normalize_username(username),))
+            conn.commit()
+    finally:
+        release_connection(conn)
 
 # ---------------------------------------------------------------------------
-# CTC CALCULATION  (unchanged - still the single source of truth for CTC)
+# CTC CALCULATIONS
 # ---------------------------------------------------------------------------
-
 def calculate_ctc(basic, da, hra, phonebill, others, esic_if_applicable, pf_basis="capped", is_pwd=False):
     b = max(0.0, float(basic or 0))
     d = max(0.0, float(da or 0))
@@ -648,7 +507,6 @@ def calculate_ctc(basic, da, hra, phonebill, others, esic_if_applicable, pf_basi
     pf_wage = min(pf_wage_base, PF_WAGE_CEILING) if pf_basis == "capped" else pf_wage_base
 
     employee_pf = round(pf_wage * EPF_EMPLOYEE_RATE, 2)
-
     employer_pf_total_12pct = round(pf_wage * EMPLOYER_PF_TOTAL_RATE, 2)
     eps_wage = min(pf_wage, PF_WAGE_CEILING)
     employer_eps = round(min(eps_wage * EPS_EMPLOYER_RATE, EPS_MAX_MONTHLY), 2)
@@ -684,166 +542,173 @@ def calculate_ctc(basic, da, hra, phonebill, others, esic_if_applicable, pf_basi
     }
     return breakdown["total_ctc"], breakdown
 
-
 # ---------------------------------------------------------------------------
 # EMPLOYEE CRUD
 # ---------------------------------------------------------------------------
-
 def add_employee(data: dict):
     conn = get_connection()
-    cur = conn.cursor()
     if "employee_code" in data:
         data["employee_code"] = _normalize_employee_code(data["employee_code"])
-    columns = ", ".join(data.keys())
-    placeholders = ", ".join(["?"] * len(data))
+    cols = list(data.keys())
+    placeholders = ", ".join(["%s"] * len(cols))
+    col_names = ", ".join(cols)
     try:
-        cur.execute(f"INSERT INTO employees ({columns}) VALUES ({placeholders})", list(data.values()))
-        conn.commit()
-        return True
-    except sqlite3.IntegrityError as e:
-        print(f"DB Error: {e}")
+        with conn.cursor() as cur:
+            cur.execute(f"INSERT INTO employees ({col_names}) VALUES ({placeholders});", list(data.values()))
+            conn.commit()
+            return True
+    except Exception:
+        conn.rollback()
         return False
     finally:
-        conn.close()
-
+        release_connection(conn)
 
 def update_employee(employee_code: str, data: dict):
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
-    cur = conn.cursor()
-    data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    set_clause = ", ".join([f"{k} = ?" for k in data.keys()])
+    data["updated_at"] = datetime.now()
+    set_clause = ", ".join([f"{k} = %s" for k in data.keys()])
     try:
-        cur.execute(f"UPDATE employees SET {set_clause} WHERE lower(trim(employee_code)) = lower(?)", list(data.values()) + [code])
-        conn.commit()
-        return True
-    except Exception as e:
-        print(f"DB Error: {e}")
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE employees SET {set_clause} WHERE LOWER(TRIM(employee_code)) = LOWER(%s);", list(data.values()) + [code])
+            conn.commit()
+            return True
+    except Exception:
+        conn.rollback()
         return False
     finally:
-        conn.close()
-
+        release_connection(conn)
 
 def delete_employee(employee_code: str):
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
-    conn.execute("DELETE FROM employees WHERE lower(trim(employee_code)) = lower(?)", (code,))
-    conn.execute("DELETE FROM users WHERE lower(trim(employee_code)) = lower(?)", (code,))
-    conn.execute("DELETE FROM leave_balances WHERE lower(trim(employee_code)) = lower(?)", (code,))
-    conn.commit()
-    conn.close()
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM employees WHERE LOWER(TRIM(employee_code)) = LOWER(%s);", (code,))
+            cur.execute("DELETE FROM users WHERE LOWER(TRIM(employee_code)) = LOWER(%s);", (code,))
+            cur.execute("DELETE FROM leave_balances WHERE LOWER(TRIM(employee_code)) = LOWER(%s);", (code,))
+            conn.commit()
+    finally:
+        release_connection(conn)
 
 def get_all_employees():
     conn = get_connection()
-    rows = conn.execute("SELECT * FROM employees ORDER BY created_at DESC").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM employees ORDER BY created_at DESC;")
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        release_connection(conn)
 
 def get_employee(employee_code: str):
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
-    row = conn.execute("SELECT * FROM employees WHERE lower(trim(employee_code)) = lower(?)", (code,)).fetchone()
-    conn.close()
-    return dict(row) if row else None
-
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM employees WHERE LOWER(TRIM(employee_code)) = LOWER(%s);", (code,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+    finally:
+        release_connection(conn)
 
 def employee_count():
     conn = get_connection()
-    row = conn.execute("SELECT COUNT(*) as c FROM employees").fetchone()
-    conn.close()
-    return row["c"] if row else 0
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM employees;")
+            return cur.fetchone()[0]
+    finally:
+        release_connection(conn)
 
 def next_employee_code():
     conn = get_connection()
-    rows = conn.execute("SELECT employee_code FROM employees").fetchall()
-    conn.close()
-    nums = []
-    for r in rows:
-        code = r["employee_code"]
-        if code and "-" in code:
-            try:
-                nums.append(int(code.split("-")[-1]))
-            except ValueError:
-                pass
-    next_id = max(nums) + 1 if nums else 1
-    return f"TT-EMP-{next_id:04d}"
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT employee_code FROM employees;")
+            rows = cur.fetchall()
+            nums = []
+            for (code,) in rows:
+                if code and "-" in code:
+                    try:
+                        nums.append(int(code.split("-")[-1]))
+                    except ValueError:
+                        pass
+            next_id = max(nums) + 1 if nums else 1
+            return f"TT-EMP-{next_id:04d}"
+    finally:
+        release_connection(conn)
 
 def get_all_employee_names():
     conn = get_connection()
-    rows = conn.execute("SELECT employee_code, employee_name FROM employees ORDER BY employee_name").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT employee_code, employee_name FROM employees ORDER BY employee_name;")
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        release_connection(conn)
 
 def get_employees_reporting_to(boss_code: str):
     if not boss_code:
         return []
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT * FROM employees WHERE lower(trim(reporting_boss_code)) = lower(?) ORDER BY employee_name",
-        (_normalize_employee_code(boss_code),),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM employees WHERE LOWER(TRIM(reporting_boss_code)) = LOWER(%s) ORDER BY employee_name;",
+                (_normalize_employee_code(boss_code),)
+            )
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        release_connection(conn)
 
 def get_statutory_summary():
     conn = get_connection()
-    row = conn.execute("""
-        SELECT
-            COALESCE(SUM(employer_pf), 0)            AS total_employer_epf,
-            COALESCE(SUM(employer_eps), 0)           AS total_employer_eps,
-            COALESCE(SUM(employer_edli), 0)          AS total_employer_edli,
-            COALESCE(SUM(employer_admin_charges), 0) AS total_admin_charges,
-            COALESCE(SUM(employer_pf_total), 0)      AS total_employer_pf,
-            COALESCE(SUM(employer_esic), 0)          AS total_employer_esic,
-            COALESCE(SUM(employee_esic), 0)          AS total_employee_esic,
-            COALESCE(SUM(pf), 0)                     AS total_employee_pf,
-            COUNT(*)                                 AS employee_count
-        FROM employees WHERE status = 'Active'
-    """).fetchone()
-    conn.close()
-    return dict(row) if row else {}
-
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT
+                    COALESCE(SUM(employer_pf), 0)            AS total_employer_epf,
+                    COALESCE(SUM(employer_eps), 0)           AS total_employer_eps,
+                    COALESCE(SUM(employer_edli), 0)          AS total_employer_edli,
+                    COALESCE(SUM(employer_admin_charges), 0) AS total_admin_charges,
+                    COALESCE(SUM(employer_pf_total), 0)      AS total_employer_pf,
+                    COALESCE(SUM(employer_esic), 0)          AS total_employer_esic,
+                    COALESCE(SUM(employee_esic), 0)          AS total_employee_esic,
+                    COALESCE(SUM(pf), 0)                     AS total_employee_pf,
+                    COUNT(*)                                 AS employee_count
+                FROM employees WHERE status = 'Active';
+            """)
+            row = cur.fetchone()
+            return dict(row) if row else {}
+    finally:
+        release_connection(conn)
 
 # ---------------------------------------------------------------------------
-# LEAVE BALANCES (admin/HR managed)
+# LEAVE BALANCES
 # ---------------------------------------------------------------------------
-
 def upsert_leave_balance(employee_code: str, leave_type: str, balance: float):
     code = _normalize_employee_code(employee_code)
     ltype = (leave_type or "").strip().upper()
     if not code or ltype not in LEAVE_TYPES:
         return False
     conn = get_connection()
-    # Match case-insensitively first so we UPDATE any existing row for this
-    # employee/leave_type even if it was saved under a different case
-    # before this fix, instead of silently inserting a duplicate.
-    existing = conn.execute(
-        "SELECT id FROM leave_balances WHERE lower(trim(employee_code)) = lower(?) AND leave_type = ?",
-        (code, ltype),
-    ).fetchone()
-    if existing:
-        conn.execute(
-            "UPDATE leave_balances SET employee_code = ?, balance = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (code, float(balance), existing["id"]),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO leave_balances (employee_code, leave_type, balance, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-            (code, ltype, float(balance)),
-        )
-    conn.commit()
-    conn.close()
-    return True
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO leave_balances (employee_code, leave_type, balance, updated_at)
+                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (employee_code, leave_type)
+                DO UPDATE SET balance = EXCLUDED.balance, updated_at = CURRENT_TIMESTAMP;
+            """, (code, ltype, float(balance)))
+            conn.commit()
+            return True
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        release_connection(conn)
 
 def bulk_upsert_leave_balances(rows):
-    """rows: iterable of dicts with employee_code, leave_type, leave_balance."""
     ok, failed = 0, 0
     touched_codes = set()
     for r in rows:
@@ -862,57 +727,51 @@ def bulk_upsert_leave_balances(rows):
             touched_codes.add(code)
         else:
             failed += 1
-    # Notify every employee whose balance changed so they see it immediately
-    # in their notification bell (fixes "can't see updated balance").
+
     for code in touched_codes:
-        emp = get_employee(code)
-        name = emp.get("employee_name", code) if emp else code
         create_notification(
             code, "Leave Balance Updated",
-            f"HR has updated your leave balance. Please check the Leave tab for your latest CL/SL/PL balance.",
+            "HR has updated your leave balance. Please check the Leave tab for your latest CL/SL/PL balance.",
             "leave_balance", None,
         )
     return ok, failed
 
-
 def get_leave_balances(employee_code: str):
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT * FROM leave_balances WHERE lower(trim(employee_code)) = lower(?) ORDER BY leave_type", (code,)
-    ).fetchall()
-    conn.close()
-    existing = {r["leave_type"]: dict(r) for r in rows}
-    out = []
-    for lt in LEAVE_TYPES:
-        if lt in existing:
-            out.append(existing[lt])
-        else:
-            out.append({"employee_code": code, "leave_type": lt, "balance": 0.0, "updated_at": None})
-    return out
-
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM leave_balances WHERE LOWER(TRIM(employee_code)) = LOWER(%s) ORDER BY leave_type;", (code,))
+            existing = {r["leave_type"]: dict(r) for r in cur.fetchall()}
+            out = []
+            for lt in LEAVE_TYPES:
+                if lt in existing:
+                    out.append(existing[lt])
+                else:
+                    out.append({"employee_code": code, "leave_type": lt, "balance": 0.0, "updated_at": None})
+            return out
+    finally:
+        release_connection(conn)
 
 def get_leave_balance_map(employee_code: str):
     return {b["leave_type"]: b["balance"] for b in get_leave_balances(employee_code)}
 
-
 def get_all_leave_balances():
     conn = get_connection()
-    rows = conn.execute("SELECT * FROM leave_balances ORDER BY employee_code, leave_type").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM leave_balances ORDER BY employee_code, leave_type;")
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        release_connection(conn)
 
 def adjust_leave_balance(employee_code: str, leave_type: str, delta: float):
-    """Add (or subtract, with a negative delta) to an employee's leave balance."""
     current = get_leave_balance_map(employee_code).get(leave_type, 0.0)
     upsert_leave_balance(employee_code, leave_type, current + delta)
 
-
 # ---------------------------------------------------------------------------
-# LEAVE REQUESTS + APPROVAL WORKFLOW
+# LEAVE REQUEST WORKFLOW
 # ---------------------------------------------------------------------------
-
 def apply_leave(employee_code, leave_type, from_date, to_date, days, reason):
     code = _normalize_employee_code(employee_code)
     emp = get_employee(code)
@@ -932,15 +791,16 @@ def apply_leave(employee_code, leave_type, from_date, to_date, days, reason):
     boss_code = _normalize_employee_code(emp.get("reporting_boss_code")) or None
 
     conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """INSERT INTO leave_requests (employee_code, leave_type, from_date, to_date, days, reason, boss_employee_code)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (code, ltype, str(from_date), str(to_date), days, reason, boss_code),
-    )
-    request_id = cur.lastrowid
-    conn.commit()
-    conn.close()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO leave_requests (employee_code, leave_type, from_date, to_date, days, reason, boss_employee_code)
+                VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;
+            """, (code, ltype, str(from_date), str(to_date), days, reason, boss_code))
+            request_id = cur.fetchone()[0]
+            conn.commit()
+    finally:
+        release_connection(conn)
 
     emp_name = emp.get("employee_name", code)
     msg = f"{emp_name} ({code}) applied for {LEAVE_TYPE_LABELS.get(ltype, ltype)} from {from_date} to {to_date} ({days:g} day(s))."
@@ -950,204 +810,176 @@ def apply_leave(employee_code, leave_type, from_date, to_date, days, reason):
 
     return True, "Leave request submitted successfully."
 
-
 def get_leave_requests(employee_code=None, boss_employee_code=None, status=None):
     conn = get_connection()
     query = "SELECT * FROM leave_requests WHERE 1=1"
     params = []
     if employee_code:
-        query += " AND lower(trim(employee_code)) = lower(?)"
+        query += " AND LOWER(TRIM(employee_code)) = LOWER(%s)"
         params.append(_normalize_employee_code(employee_code))
     if boss_employee_code:
-        query += " AND lower(trim(boss_employee_code)) = lower(?)"
+        query += " AND LOWER(TRIM(boss_employee_code)) = LOWER(%s)"
         params.append(_normalize_employee_code(boss_employee_code))
     if status:
-        query += " AND status = ?"
+        query += " AND status = %s"
         params.append(status)
-    query += " ORDER BY applied_on DESC"
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
+    query += " ORDER BY applied_on DESC;"
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, params)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        release_connection(conn)
 
 def get_leave_request_counts(employee_code=None, boss_employee_code=None):
-    """Quick Pending/Approved/Rejected counters for dashboards."""
     reqs = get_leave_requests(employee_code=employee_code, boss_employee_code=boss_employee_code)
     counts = {"Pending": 0, "Approved": 0, "Rejected": 0}
     for r in reqs:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
     return counts
 
-
 def decide_leave(request_id: int, status: str, decided_by: str = None):
     conn = get_connection()
-    row = conn.execute("SELECT * FROM leave_requests WHERE id = ?", (request_id,)).fetchone()
-    if not row:
-        conn.close()
-        return False
-    req = dict(row)
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM leave_requests WHERE id = %s;", (request_id,))
+            row = cur.fetchone()
+            if not row:
+                return False
+            req = dict(row)
 
-    conn.execute(
-        "UPDATE leave_requests SET status = ?, decided_by = ?, decided_at = CURRENT_TIMESTAMP WHERE id = ?",
-        (status, decided_by, request_id),
-    )
-    conn.commit()
-    conn.close()
+            cur.execute(
+                "UPDATE leave_requests SET status = %s, decided_by = %s, decided_at = CURRENT_TIMESTAMP WHERE id = %s;",
+                (status, decided_by, request_id)
+            )
+            conn.commit()
+    finally:
+        release_connection(conn)
 
     if status == "Approved":
         adjust_leave_balance(req["employee_code"], req["leave_type"], -float(req["days"] or 0))
 
     decider_label = decided_by or ("HR/Admin" if not req.get("boss_employee_code") else "your reporting manager")
     ltype_label = LEAVE_TYPE_LABELS.get(req["leave_type"], req["leave_type"])
-    msg = (f"Your {ltype_label} request ({req['from_date']} to {req['to_date']}, "
-           f"{req['days']:g} day(s)) was {status.lower()} by {decider_label}.")
+    msg = f"Your {ltype_label} request ({req['from_date']} to {req['to_date']}, {req['days']:g} day(s)) was {status.lower()} by {decider_label}."
     create_notification(req["employee_code"], f"Leave {status}", msg, "leave_request", request_id)
 
     emp_row = get_employee(req["employee_code"])
     emp_name = emp_row.get("employee_name", req["employee_code"]) if emp_row else req["employee_code"]
-    admin_msg = (f"{emp_name} ({req['employee_code']})'s {ltype_label} request "
-                 f"({req['from_date']} to {req['to_date']}) was {status.upper()} by "
-                 f"{decided_by or 'HR/Admin'}.")
+    admin_msg = f"{emp_name} ({req['employee_code']})'s {ltype_label} request ({req['from_date']} to {req['to_date']}) was {status.upper()} by {decided_by or 'HR/Admin'}."
     create_notification("ADMIN", f"Leave {status}", admin_msg, "leave_request", request_id)
 
-    # Also notify the reporting boss, so they stay in the loop even when
-    # HR/Admin is the one who actually decided the request.
     boss_code = req.get("boss_employee_code")
     if boss_code and _normalize_employee_code(boss_code) != _normalize_employee_code(decided_by or ""):
-        boss_msg = (f"{emp_name} ({req['employee_code']})'s {ltype_label} request "
-                    f"({req['from_date']} to {req['to_date']}) was {status.upper()} by "
-                    f"{decided_by or 'HR/Admin'}.")
+        boss_msg = f"{emp_name} ({req['employee_code']})'s {ltype_label} request ({req['from_date']} to {req['to_date']}) was {status.upper()} by {decided_by or 'HR/Admin'}."
         create_notification(boss_code, f"Team Leave {status}", boss_msg, "leave_request", request_id)
 
     return True
 
-
-def get_leave_balance(employee_code: str):
-    """Legacy helper kept for backward compatibility (fixed annual pools)."""
-    code = _normalize_employee_code(employee_code)
-    conn = get_connection()
-    rows = conn.execute(
-        "SELECT leave_type, SUM(days) as used FROM leave_requests WHERE lower(trim(employee_code)) = lower(?) AND status = 'Approved' GROUP BY leave_type",
-        (code,),
-    ).fetchall()
-    conn.close()
-
-    used_map = {r["leave_type"]: r["used"] or 0 for r in rows}
-    return {
-        "casual_total": 12,
-        "casual_used": used_map.get("CL", used_map.get("Casual", 0)),
-        "sick_total": 7,
-        "sick_used": used_map.get("SL", used_map.get("Sick", 0)),
-        "earned_total": 15,
-        "earned_used": used_map.get("PL", used_map.get("Earned", 0)),
-    }
-
-
 # ---------------------------------------------------------------------------
-# NOTIFICATIONS
+# NOTIFICATIONS & ANNOUNCEMENTS
 # ---------------------------------------------------------------------------
-
 def create_notification(recipient_code, title, message, related_type=None, related_id=None):
     conn = get_connection()
     recipient = (recipient_code or "").strip()
-    if recipient.upper() != "ADMIN":
-        recipient = _normalize_employee_code(recipient)
-    else:
-        recipient = "ADMIN"
-    conn.execute(
-        """INSERT INTO notifications (recipient_code, title, message, related_type, related_id)
-           VALUES (?, ?, ?, ?, ?)""",
-        (recipient, title, message, related_type, related_id),
-    )
-    conn.commit()
-    conn.close()
-
+    recipient = "ADMIN" if recipient.upper() == "ADMIN" else _normalize_employee_code(recipient)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO notifications (recipient_code, title, message, related_type, related_id)
+                VALUES (%s, %s, %s, %s, %s);
+            """, (recipient, title, message, related_type, related_id))
+            conn.commit()
+    finally:
+        release_connection(conn)
 
 def get_notifications(recipient_code, unread_only=False, limit=30):
     conn = get_connection()
-    query = "SELECT * FROM notifications WHERE recipient_code = ?"
     recipient = (recipient_code or "").strip()
     recipient = "ADMIN" if recipient.upper() == "ADMIN" else _normalize_employee_code(recipient)
+    query = "SELECT * FROM notifications WHERE recipient_code = %s"
     params = [recipient]
     if unread_only:
         query += " AND is_read = 0"
-    query += " ORDER BY created_at DESC LIMIT ?"
+    query += " ORDER BY created_at DESC LIMIT %s;"
     params.append(limit)
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, params)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        release_connection(conn)
 
 def get_notification_log(recipient_code="ADMIN", related_type=None, limit=500):
-    """Full, un-capped notification history for audit purposes (e.g. the
-    Admin 'who applied / who approved / who rejected' activity log)."""
     conn = get_connection()
-    query = "SELECT * FROM notifications WHERE recipient_code = ?"
     recipient = (recipient_code or "").strip()
     recipient = "ADMIN" if recipient.upper() == "ADMIN" else _normalize_employee_code(recipient)
+    query = "SELECT * FROM notifications WHERE recipient_code = %s"
     params = [recipient]
     if related_type:
-        query += " AND related_type = ?"
+        query += " AND related_type = %s"
         params.append(related_type)
-    query += " ORDER BY created_at DESC LIMIT ?"
+    query += " ORDER BY created_at DESC LIMIT %s;"
     params.append(limit)
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, params)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        release_connection(conn)
 
 def unread_notification_count(recipient_code):
     conn = get_connection()
     recipient = (recipient_code or "").strip()
     recipient = "ADMIN" if recipient.upper() == "ADMIN" else _normalize_employee_code(recipient)
-    row = conn.execute(
-        "SELECT COUNT(*) as c FROM notifications WHERE recipient_code = ? AND is_read = 0",
-        (recipient,),
-    ).fetchone()
-    conn.close()
-    return row["c"] if row else 0
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM notifications WHERE recipient_code = %s AND is_read = 0;", (recipient,))
+            return cur.fetchone()[0]
+    finally:
+        release_connection(conn)
 
 def mark_notification_read(notification_id: int):
     conn = get_connection()
-    conn.execute("UPDATE notifications SET is_read = 1 WHERE id = ?", (notification_id,))
-    conn.commit()
-    conn.close()
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE notifications SET is_read = 1 WHERE id = %s;", (notification_id,))
+            conn.commit()
+    finally:
+        release_connection(conn)
 
 def mark_all_notifications_read(recipient_code):
     conn = get_connection()
     recipient = (recipient_code or "").strip()
     recipient = "ADMIN" if recipient.upper() == "ADMIN" else _normalize_employee_code(recipient)
-    conn.execute("UPDATE notifications SET is_read = 1 WHERE recipient_code = ?", (recipient,))
-    conn.commit()
-    conn.close()
-
-
-# ---------------------------------------------------------------------------
-# ANNOUNCEMENTS
-# ---------------------------------------------------------------------------
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE notifications SET is_read = 1 WHERE recipient_code = %s;", (recipient,))
+            conn.commit()
+    finally:
+        release_connection(conn)
 
 def add_announcement(title, message):
     conn = get_connection()
-    conn.execute("INSERT INTO announcements (title, message) VALUES (?, ?)", (title, message))
-    conn.commit()
-    conn.close()
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO announcements (title, message) VALUES (%s, %s);", (title, message))
+            conn.commit()
+    finally:
+        release_connection(conn)
 
 def get_announcements(limit=10):
     conn = get_connection()
-    rows = conn.execute("SELECT * FROM announcements ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM announcements ORDER BY created_at DESC LIMIT %s;", (limit,))
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        release_connection(conn)
 
 # ---------------------------------------------------------------------------
-# LOSS OF PAY (LOP) & EXTRA DAY RECORDS  (legacy manual-entry path, kept
-# for backward compatibility; the Attendance engine below is now the
-# preferred way to drive payroll for a month whenever data exists there)
+# LOSS OF PAY (LOP) / EXTRA DAYS (LEGACY)
 # ---------------------------------------------------------------------------
-
 def add_lop_extra_record(employee_code, record_type, record_date, day_count, reason="", created_by=None):
     code = _normalize_employee_code(employee_code)
     rtype = (record_type or "").strip().upper()
@@ -1155,30 +987,27 @@ def add_lop_extra_record(employee_code, record_type, record_date, day_count, rea
         return False
     try:
         days = float(day_count)
-    except (TypeError, ValueError):
-        return False
-    if days <= 0:
-        return False
-    try:
+        if days <= 0:
+            return False
         rdate = str(record_date)
         y, m = int(rdate[0:4]), int(rdate[5:7])
     except Exception:
         return False
 
     conn = get_connection()
-    conn.execute(
-        """INSERT INTO lop_extra_records
-           (employee_code, record_type, record_date, day_count, reason, month, year, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (code, rtype, rdate, days, reason, m, y, created_by),
-    )
-    conn.commit()
-    conn.close()
-    return True
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO lop_extra_records
+                (employee_code, record_type, record_date, day_count, reason, month, year, created_by)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+            """, (code, rtype, rdate, days, reason, m, y, created_by))
+            conn.commit()
+            return True
+    finally:
+        release_connection(conn)
 
 def bulk_upsert_lop_extra(rows, record_type, created_by=None):
-    """rows: iterable of dicts with employee_code, date, reason, days."""
     ok, failed = 0, 0
     for r in rows:
         code = _normalize_employee_code(r.get("employee_code", ""))
@@ -1198,104 +1027,100 @@ def bulk_upsert_lop_extra(rows, record_type, created_by=None):
             failed += 1
     return ok, failed
 
-
 def delete_lop_extra_record(record_id: int):
     conn = get_connection()
-    conn.execute("DELETE FROM lop_extra_records WHERE id = ?", (record_id,))
-    conn.commit()
-    conn.close()
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM lop_extra_records WHERE id = %s;", (record_id,))
+            conn.commit()
+    finally:
+        release_connection(conn)
 
 def get_lop_extra_records(employee_code=None, month=None, year=None, record_type=None):
     conn = get_connection()
     query = "SELECT * FROM lop_extra_records WHERE 1=1"
     params = []
     if employee_code:
-        query += " AND lower(trim(employee_code)) = lower(?)"
+        query += " AND LOWER(TRIM(employee_code)) = LOWER(%s)"
         params.append(_normalize_employee_code(employee_code))
     if month:
-        query += " AND month = ?"
+        query += " AND month = %s"
         params.append(month)
     if year:
-        query += " AND year = ?"
+        query += " AND year = %s"
         params.append(year)
     if record_type:
-        query += " AND record_type = ?"
+        query += " AND record_type = %s"
         params.append(record_type.upper())
-    query += " ORDER BY record_date DESC"
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
+    query += " ORDER BY record_date DESC;"
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, params)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        release_connection(conn)
 
 def get_lop_extra_summary(employee_code: str, month: int, year: int):
-    """Returns total LOP days and total Extra days for one employee/month/year
-    from the legacy manual-entry table."""
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
-    lop_row = conn.execute(
-        "SELECT COALESCE(SUM(day_count),0) as total FROM lop_extra_records "
-        "WHERE lower(trim(employee_code)) = lower(?) AND month = ? AND year = ? AND record_type = 'LOP'",
-        (code, month, year),
-    ).fetchone()
-    extra_row = conn.execute(
-        "SELECT COALESCE(SUM(day_count),0) as total FROM lop_extra_records "
-        "WHERE lower(trim(employee_code)) = lower(?) AND month = ? AND year = ? AND record_type = 'EXTRA'",
-        (code, month, year),
-    ).fetchone()
-    conn.close()
-    return {"lop_days": lop_row["total"] or 0.0, "extra_days": extra_row["total"] or 0.0}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(day_count), 0) FROM lop_extra_records
+                WHERE LOWER(TRIM(employee_code)) = LOWER(%s) AND month = %s AND year = %s AND record_type = 'LOP';
+            """, (code, month, year))
+            lop = cur.fetchone()[0] or 0.0
 
+            cur.execute("""
+                SELECT COALESCE(SUM(day_count), 0) FROM lop_extra_records
+                WHERE LOWER(TRIM(employee_code)) = LOWER(%s) AND month = %s AND year = %s AND record_type = 'EXTRA';
+            """, (code, month, year))
+            extra = cur.fetchone()[0] or 0.0
+            return {"lop_days": float(lop), "extra_days": float(extra)}
+    finally:
+        release_connection(conn)
 
 # ---------------------------------------------------------------------------
-# MONTHLY ATTENDANCE ENGINE  (new primary payroll driver)
+# ATTENDANCE ENGINE
 # ---------------------------------------------------------------------------
-
 def upsert_attendance_day(employee_code, month, year, day, status, created_by=None):
     code = _normalize_employee_code(employee_code)
     status = (status or "").strip().upper()
     if not code or status not in ATTENDANCE_STATUS_CODES:
         return False
     try:
-        day = int(day)
-        month = int(month)
-        year = int(year)
+        day, month, year = int(day), int(month), int(year)
+        if not (1 <= day <= 31):
+            return False
     except (TypeError, ValueError):
-        return False
-    if not (1 <= day <= 31):
         return False
 
     conn = get_connection()
-    conn.execute(
-        """INSERT INTO attendance_records (employee_code, month, year, day, status, created_by)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(employee_code, month, year, day) DO UPDATE SET
-               status = excluded.status, created_by = excluded.created_by,
-               created_at = CURRENT_TIMESTAMP""",
-        (code, month, year, day, status, created_by),
-    )
-    conn.commit()
-    conn.close()
-    return True
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO attendance_records (employee_code, month, year, day, status, created_by)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT(employee_code, month, year, day) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    created_by = EXCLUDED.created_by,
+                    created_at = CURRENT_TIMESTAMP;
+            """, (code, month, year, day, status, created_by))
+            conn.commit()
+            return True
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        release_connection(conn)
 
 def bulk_upsert_attendance(rows, month, year, created_by=None, day_columns=None):
-    """rows: iterable of dicts. Each dict must contain 'employee_code' and
-    one key per day of the month (as given in day_columns, e.g. '1'..'31'),
-    with a status code (P/A/HD/WO/H/PL/EX) as the value. Blank/NaN cells
-    are skipped (treated as 'not recorded' rather than an error).
-    Returns (employees_processed, day_cells_applied, failed_cells)."""
     if day_columns is None:
         day_columns = [str(d) for d in range(1, 32)]
-    employees_processed = 0
-    applied = 0
-    failed = 0
+    employees_processed, applied, failed = 0, 0, 0
     for r in rows:
         code = _normalize_employee_code(r.get("employee_code", ""))
-        if not code:
-            continue
-        emp = get_employee(code)
-        if not emp:
+        if not code or not get_employee(code):
             failed += len(day_columns)
             continue
         any_cell = False
@@ -1322,39 +1147,38 @@ def bulk_upsert_attendance(rows, month, year, created_by=None, day_columns=None)
             employees_processed += 1
     return employees_processed, applied, failed
 
-
 def get_attendance_records(employee_code=None, month=None, year=None):
     conn = get_connection()
     query = "SELECT * FROM attendance_records WHERE 1=1"
     params = []
     if employee_code:
-        query += " AND lower(trim(employee_code)) = lower(?)"
+        query += " AND LOWER(TRIM(employee_code)) = LOWER(%s)"
         params.append(_normalize_employee_code(employee_code))
     if month:
-        query += " AND month = ?"
+        query += " AND month = %s"
         params.append(month)
     if year:
-        query += " AND year = ?"
+        query += " AND year = %s"
         params.append(year)
-    query += " ORDER BY employee_code, day"
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
+    query += " ORDER BY employee_code, day;"
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, params)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        release_connection(conn)
 
 def has_attendance_for_month(employee_code, month, year):
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
-    row = conn.execute(
-        "SELECT COUNT(*) as c FROM attendance_records WHERE lower(trim(employee_code))=lower(?) AND month=? AND year=?",
-        (code, month, year),
-    ).fetchone()
-    conn.close()
-    return (row["c"] or 0) > 0
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM attendance_records WHERE LOWER(TRIM(employee_code)) = LOWER(%s) AND month = %s AND year = %s;", (code, month, year))
+            return cur.fetchone()[0] > 0
+    finally:
+        release_connection(conn)
 
 def get_attendance_summary(employee_code, month, year):
-    """Present/Absent/HalfDay/Extra/LOP-day totals for one employee/month."""
     recs = get_attendance_records(employee_code, month, year)
     present = sum(1 for r in recs if r["status"] in PRESENT_CODES)
     absent = sum(1 for r in recs if r["status"] in LOP_FULL_CODES)
@@ -1376,10 +1200,7 @@ def get_attendance_summary(employee_code, month, year):
         "days_recorded": len(recs),
     }
 
-
 def get_attendance_matrix(month, year):
-    """Wide-format matrix (one row per employee, one column per day) for
-    display/export in the Admin portal."""
     recs = get_attendance_records(month=month, year=year)
     by_emp = {}
     for r in recs:
@@ -1397,18 +1218,18 @@ def get_attendance_matrix(month, year):
     out.sort(key=lambda r: r["employee_code"])
     return out
 
-
 def delete_attendance_month(month, year):
     conn = get_connection()
-    conn.execute("DELETE FROM attendance_records WHERE month = ? AND year = ?", (month, year))
-    conn.commit()
-    conn.close()
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM attendance_records WHERE month = %s AND year = %s;", (month, year))
+            conn.commit()
+    finally:
+        release_connection(conn)
 
 # ---------------------------------------------------------------------------
-# PAYROLL / PAYSLIP HISTORY
+# PAYROLL RECORDS
 # ---------------------------------------------------------------------------
-
 def _snapshot_from_employee(emp: dict):
     ctc, bd = calculate_ctc(
         emp.get("basic_pay", 0), emp.get("da", 0), emp.get("hra", 0),
@@ -1432,16 +1253,7 @@ def _snapshot_from_employee(emp: dict):
         "net_pay": net_pay,
     }
 
-
 def generate_payroll(employee_code: str, month: int, year: int, generated_by: str = None, notify: bool = False):
-    """Snapshot the employee's current salary structure for a month.
-
-    Gross = Basic + DA + HRA + Phone + Others  (exactly as requested).
-    Loss-of-Pay / Extra-day amounts are calculated on Gross ÷ STANDARD_WORKING_DAYS.
-    Attendance data (if uploaded for this month) is the preferred source for
-    LOP/Extra days; if none was uploaded, the legacy manual LOP/Extra entries
-    are used instead so nothing already recorded is lost.
-    """
     code = _normalize_employee_code(employee_code)
     emp = get_employee(code)
     if not emp:
@@ -1475,44 +1287,43 @@ def generate_payroll(employee_code: str, month: int, year: int, generated_by: st
     snap["net_pay"] = round(snap["net_pay"] - lop_amount + extra_amount, 2)
 
     conn = get_connection()
-    conn.execute(
-        """INSERT INTO payroll_records
-           (employee_code, month, year, basic_pay, da, hra, phonebill_pay, others, gross,
-            employee_pf, employee_esic, employer_pf_total, employer_esic, ctc, net_pay,
-            lop_days, lop_amount, extra_days, extra_amount, per_day_rate, present_days, source,
-            generated_by, generated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
-           ON CONFLICT(employee_code, month, year) DO UPDATE SET
-                basic_pay=excluded.basic_pay, da=excluded.da, hra=excluded.hra,
-                phonebill_pay=excluded.phonebill_pay, others=excluded.others, gross=excluded.gross,
-                employee_pf=excluded.employee_pf, employee_esic=excluded.employee_esic,
-                employer_pf_total=excluded.employer_pf_total, employer_esic=excluded.employer_esic,
-                ctc=excluded.ctc, net_pay=excluded.net_pay,
-                lop_days=excluded.lop_days, lop_amount=excluded.lop_amount,
-                extra_days=excluded.extra_days, extra_amount=excluded.extra_amount,
-                per_day_rate=excluded.per_day_rate, present_days=excluded.present_days,
-                source=excluded.source,
-                generated_by=excluded.generated_by, generated_at=CURRENT_TIMESTAMP""",
-        (code, month, year, snap["basic_pay"], snap["da"], snap["hra"], snap["phonebill_pay"],
-         snap["others"], snap["gross"], snap["employee_pf"], snap["employee_esic"],
-         snap["employer_pf_total"], snap["employer_esic"], snap["ctc"], snap["net_pay"],
-         snap["lop_days"], snap["lop_amount"], snap["extra_days"], snap["extra_amount"],
-         snap["per_day_rate"], snap["present_days"], snap["source"],
-         generated_by),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO payroll_records
+                (employee_code, month, year, basic_pay, da, hra, phonebill_pay, others, gross,
+                 employee_pf, employee_esic, employer_pf_total, employer_esic, ctc, net_pay,
+                 lop_days, lop_amount, extra_days, extra_amount, per_day_rate, present_days, source,
+                 generated_by, generated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, CURRENT_TIMESTAMP)
+                ON CONFLICT(employee_code, month, year) DO UPDATE SET
+                    basic_pay=EXCLUDED.basic_pay, da=EXCLUDED.da, hra=EXCLUDED.hra,
+                    phonebill_pay=EXCLUDED.phonebill_pay, others=EXCLUDED.others, gross=EXCLUDED.gross,
+                    employee_pf=EXCLUDED.employee_pf, employee_esic=EXCLUDED.employee_esic,
+                    employer_pf_total=EXCLUDED.employer_pf_total, employer_esic=EXCLUDED.employer_esic,
+                    ctc=EXCLUDED.ctc, net_pay=EXCLUDED.net_pay,
+                    lop_days=EXCLUDED.lop_days, lop_amount=EXCLUDED.lop_amount,
+                    extra_days=EXCLUDED.extra_days, extra_amount=EXCLUDED.extra_amount,
+                    per_day_rate=EXCLUDED.per_day_rate, present_days=EXCLUDED.present_days,
+                    source=EXCLUDED.source,
+                    generated_by=EXCLUDED.generated_by, generated_at=CURRENT_TIMESTAMP;
+            """, (code, month, year, snap["basic_pay"], snap["da"], snap["hra"], snap["phonebill_pay"],
+                  snap["others"], snap["gross"], snap["employee_pf"], snap["employee_esic"],
+                  snap["employer_pf_total"], snap["employer_esic"], snap["ctc"], snap["net_pay"],
+                  snap["lop_days"], snap["lop_amount"], snap["extra_days"], snap["extra_amount"],
+                  snap["per_day_rate"], snap["present_days"], snap["source"], generated_by))
+            conn.commit()
+    finally:
+        release_connection(conn)
 
     if notify:
         month_label = MONTH_NAMES[month - 1]
         create_notification(
             code, "Payslip Ready",
-            f"Your payslip for {month_label} {year} has been generated and is now available to download "
-            f"from the Payslips tab. Net Pay: ₹{snap['net_pay']:,.0f}.",
+            f"Your payslip for {month_label} {year} has been generated. Net Pay: ₹{snap['net_pay']:,.0f}.",
             "payslip", None,
         )
     return True
-
 
 def generate_payroll_for_all(month: int, year: int, generated_by: str = None, active_only=True, notify: bool = True):
     emps = get_all_employees()
@@ -1524,43 +1335,44 @@ def generate_payroll_for_all(month: int, year: int, generated_by: str = None, ac
             count += 1
     return count
 
-
 def get_payroll_record(employee_code: str, month: int, year: int):
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
-    row = conn.execute(
-        "SELECT * FROM payroll_records WHERE lower(trim(employee_code)) = lower(?) AND month = ? AND year = ?",
-        (code, month, year),
-    ).fetchone()
-    conn.close()
-    return dict(row) if row else None
-
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM payroll_records WHERE LOWER(TRIM(employee_code)) = LOWER(%s) AND month = %s AND year = %s;", (code, month, year))
+            row = cur.fetchone()
+            return dict(row) if row else None
+    finally:
+        release_connection(conn)
 
 def get_payroll_months_for_employee(employee_code: str):
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT month, year FROM payroll_records WHERE lower(trim(employee_code)) = lower(?) ORDER BY year DESC, month DESC",
-        (code,),
-    ).fetchall()
-    conn.close()
-    return [(r["month"], r["year"]) for r in rows]
-
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT month, year FROM payroll_records WHERE LOWER(TRIM(employee_code)) = LOWER(%s) ORDER BY year DESC, month DESC;", (code,))
+            return [(r[0], r[1]) for r in cur.fetchall()]
+    finally:
+        release_connection(conn)
 
 def get_all_payroll_records(month=None, year=None, employee_code=None):
     conn = get_connection()
     query = "SELECT * FROM payroll_records WHERE 1=1"
     params = []
     if month:
-        query += " AND month = ?"
+        query += " AND month = %s"
         params.append(month)
     if year:
-        query += " AND year = ?"
+        query += " AND year = %s"
         params.append(year)
     if employee_code:
-        query += " AND lower(trim(employee_code)) = lower(?)"
+        query += " AND LOWER(TRIM(employee_code)) = LOWER(%s)"
         params.append(_normalize_employee_code(employee_code))
-    query += " ORDER BY year DESC, month DESC, employee_code"
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    query += " ORDER BY year DESC, month DESC, employee_code;"
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, params)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        release_connection(conn)
