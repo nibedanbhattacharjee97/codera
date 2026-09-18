@@ -34,11 +34,22 @@ DB_URL = _get_database_url()
 def get_connection_pool():
     if not DB_URL:
         raise ValueError("DATABASE_URL not configured. Please add it to Streamlit Secrets or Environment Variables.")
-    
+
     dsn = DB_URL
-    # Ensure Neon doesn't drop cold-starts during serverless wakeups
-    if "connect_timeout" not in dsn:
-        dsn += ("&" if "?" in dsn else "?") + "connect_timeout=15"
+    # Ensure Neon doesn't drop cold-starts during serverless wakeups, and
+    # keep the TCP link alive so we don't pay a fresh SSL handshake / Neon
+    # cold-start on every single Streamlit rerun (this was the single
+    # biggest cause of "every click feels slow").
+    extra_params = {
+        "connect_timeout": "15",
+        "keepalives": "1",
+        "keepalives_idle": "30",
+        "keepalives_interval": "10",
+        "keepalives_count": "3",
+    }
+    for k, v in extra_params.items():
+        if k not in dsn:
+            dsn += ("&" if "?" in dsn else "?") + f"{k}={v}"
 
     # Retry up to 3 times to allow Neon compute to wake from 'Idle' state
     last_err = None
@@ -46,7 +57,7 @@ def get_connection_pool():
         try:
             return psycopg2.pool.ThreadedConnectionPool(
                 minconn=1,
-                maxconn=10,
+                maxconn=20,
                 dsn=dsn
             )
         except psycopg2.OperationalError as e:
@@ -158,7 +169,16 @@ def verify_password(password: str, stored_hash: str) -> tuple[bool, bool]:
 # ---------------------------------------------------------------------------
 # DATABASE INITIALIZATION
 # ---------------------------------------------------------------------------
-def init_db():
+def _run_init_db():
+    """The actual, expensive schema-creation work. This used to run on
+    EVERY Streamlit rerun (i.e. every single button click / tab switch /
+    form submit in admin.py and employee.py), which meant every click paid
+    for a full multi-statement DDL round trip to Postgres plus the
+    'CREATE TABLE IF NOT EXISTS' existence checks and an admin-user lookup.
+    Against a serverless Neon endpoint that adds up fast and was almost
+    certainly the main reason logins/clicks felt slow after the Postgres
+    migration. It's now wrapped by init_db() below so it only executes
+    once per running app process, not once per click."""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -331,6 +351,23 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(employee_code, month, year, day)
                 );
+
+                -- ---------------------------------------------------------
+                -- Indexes: these tables get filtered by these columns on
+                -- almost every page load (leave approvals, payslips,
+                -- attendance, notification bell). Without them Postgres
+                -- falls back to sequential scans that get slower as the
+                -- tables grow, which compounds the "everything feels slow"
+                -- complaint over time.
+                -- ---------------------------------------------------------
+                CREATE INDEX IF NOT EXISTS idx_leave_requests_employee_code ON leave_requests(employee_code);
+                CREATE INDEX IF NOT EXISTS idx_leave_requests_boss_code ON leave_requests(boss_employee_code);
+                CREATE INDEX IF NOT EXISTS idx_leave_requests_status ON leave_requests(status);
+                CREATE INDEX IF NOT EXISTS idx_notifications_recipient ON notifications(recipient_code, is_read);
+                CREATE INDEX IF NOT EXISTS idx_payroll_emp_month_year ON payroll_records(employee_code, month, year);
+                CREATE INDEX IF NOT EXISTS idx_attendance_emp_month_year ON attendance_records(employee_code, month, year);
+                CREATE INDEX IF NOT EXISTS idx_leave_balances_emp ON leave_balances(employee_code);
+                CREATE INDEX IF NOT EXISTS idx_lop_extra_emp_month_year ON lop_extra_records(employee_code, month, year);
             """)
 
             cur.execute("SELECT COUNT(*) FROM users WHERE role = 'admin';")
@@ -345,6 +382,18 @@ def init_db():
         raise e
     finally:
         release_connection(conn)
+
+@st.cache_resource
+def _init_db_cached():
+    """st.cache_resource means this body runs exactly once for the life of
+    the app process (shared across every user/session), no matter how many
+    times init_db() gets called from admin.py / employee.py on every rerun.
+    This is the main login/click speed fix."""
+    _run_init_db()
+    return True
+
+def init_db():
+    _init_db_cached()
 
 # ---------------------------------------------------------------------------
 # AUTHENTICATION
@@ -770,6 +819,15 @@ def adjust_leave_balance(employee_code: str, leave_type: str, delta: float):
 
 # ---------------------------------------------------------------------------
 # LEAVE REQUEST WORKFLOW
+#
+# Approval order of precedence (enforced in the UI, admin.py / employee.py):
+#   1. If the employee has a reporting_boss_code set, ONLY that boss can
+#      approve/reject the request from their Team Approvals tab.
+#   2. Admin/HR can only decide a request directly when there is NO
+#      reporting boss assigned (boss_employee_code is NULL) — those go
+#      straight to HR. Admin still sees every request for visibility and
+#      has an explicit "HR Override" option for when a boss is
+#      unavailable, but it no longer bypasses the boss by default.
 # ---------------------------------------------------------------------------
 def apply_leave(employee_code, leave_type, from_date, to_date, days, reason):
     code = _normalize_employee_code(employee_code)
@@ -804,10 +862,12 @@ def apply_leave(employee_code, leave_type, from_date, to_date, days, reason):
     emp_name = emp.get("employee_name", code)
     msg = f"{emp_name} ({code}) applied for {LEAVE_TYPE_LABELS.get(ltype, ltype)} from {from_date} to {to_date} ({days:g} day(s))."
     if boss_code:
-        create_notification(boss_code, "New Leave Request", msg, "leave_request", request_id)
+        create_notification(boss_code, "New Leave Request — Your Approval Needed", msg, "leave_request", request_id)
     create_notification("ADMIN", "New Leave Request", msg, "leave_request", request_id)
 
-    return True, "Leave request submitted successfully."
+    if boss_code:
+        return True, "Leave request submitted successfully and sent to your reporting boss for approval."
+    return True, "Leave request submitted successfully. No reporting boss is assigned to you, so this has been sent directly to HR/Admin."
 
 def get_leave_requests(employee_code=None, boss_employee_code=None, status=None):
     conn = get_connection()
@@ -906,6 +966,31 @@ def get_notifications(recipient_code, unread_only=False, limit=30):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(query, params)
             return [dict(r) for r in cur.fetchall()]
+    finally:
+        release_connection(conn)
+
+def get_notifications_with_unread_count(recipient_code, limit=20):
+    """Combines what used to be two separate pool checkouts (get_notifications
+    + unread_notification_count) into a single connection checkout with two
+    queries on it. The sidebar bell calls this on every single page render
+    for every tab switch, so halving its connection-pool round trips is a
+    meaningful, low-risk speed win."""
+    conn = get_connection()
+    recipient = (recipient_code or "").strip()
+    recipient = "ADMIN" if recipient.upper() == "ADMIN" else _normalize_employee_code(recipient)
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM notifications WHERE recipient_code = %s ORDER BY created_at DESC LIMIT %s;",
+                (recipient, limit)
+            )
+            notifs = [dict(r) for r in cur.fetchall()]
+            cur.execute(
+                "SELECT COUNT(*) FROM notifications WHERE recipient_code = %s AND is_read = 0;",
+                (recipient,)
+            )
+            unread = cur.fetchone()[0]
+            return notifs, unread
     finally:
         release_connection(conn)
 
