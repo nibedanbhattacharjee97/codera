@@ -14,6 +14,16 @@ whitespace (very easy to happen from an .xlsx export) would silently
 save under a *different* key than the one the Employee Portal looks
 up, so updates made in Admin never appeared for the employee even
 though the row really was written to the database.
+
+UPDATE (this revision):
+  - Added bank_name / ifsc_code / blood_group to the employee master.
+  - Added a proper monthly Attendance engine (attendance_records table)
+    that replaces manual Loss-of-Pay entry as the primary way to drive
+    payroll deductions/extra-day pay. The old lop_extra_records path is
+    kept for backward compatibility but payroll now prefers attendance
+    data for a month whenever it exists.
+  - decide_leave() now also notifies the reporting boss (not just the
+    employee and ADMIN) so nobody is left out of the loop.
 """
 
 import sqlite3
@@ -71,7 +81,7 @@ MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
                "July", "August", "September", "October", "November", "December"]
 
 # ---------------------------------------------------------------------------
-# LOSS OF PAY (LOP) / EXTRA DAY CONSTANTS
+# LOSS OF PAY (LOP) / EXTRA DAY CONSTANTS  (legacy manual-entry path)
 # ---------------------------------------------------------------------------
 STANDARD_WORKING_DAYS = 26
 LOP_EXTRA_TYPES = ["LOP", "EXTRA"]
@@ -79,6 +89,27 @@ LOP_EXTRA_TYPE_LABELS = {
     "LOP": "Loss of Pay",
     "EXTRA": "Extra Day Worked",
 }
+
+# ---------------------------------------------------------------------------
+# MONTHLY ATTENDANCE CONSTANTS  (new primary payroll-driver)
+# ---------------------------------------------------------------------------
+# Status codes accepted in the attendance grid / bulk-upload sheet.
+ATTENDANCE_STATUS_LABELS = {
+    "P":  "Present",
+    "A":  "Absent (Loss of Pay - full day)",
+    "HD": "Half Day (Loss of Pay - half day)",
+    "WO": "Week Off (paid, no deduction)",
+    "H":  "Holiday (paid, no deduction)",
+    "PL": "On Approved Leave (paid, no deduction)",
+    "EX": "Extra Day Worked (paid on top of gross)",
+}
+ATTENDANCE_STATUS_CODES = list(ATTENDANCE_STATUS_LABELS.keys())
+# Codes that count as a full Loss-of-Pay day / half Loss-of-Pay day.
+LOP_FULL_CODES = {"A"}
+LOP_HALF_CODES = {"HD"}
+EXTRA_CODES = {"EX"}
+# Codes that count towards "present" for the summary card.
+PRESENT_CODES = {"P", "EX"}
 
 
 def get_connection():
@@ -363,6 +394,20 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS attendance_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_code TEXT NOT NULL,
+            month INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            day INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            created_by TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(employee_code, month, year, day)
+        )
+    """)
+
     conn.commit()
 
     for col, decl in [
@@ -381,6 +426,9 @@ def init_db():
         ("employer_esic", "REAL DEFAULT 0"),
         ("employee_esic", "REAL DEFAULT 0"),
         ("reporting_boss_code", "TEXT"),
+        ("bank_name", "TEXT"),
+        ("ifsc_code", "TEXT"),
+        ("blood_group", "TEXT"),
     ]:
         _ensure_column(cur, "employees", col, decl)
 
@@ -398,6 +446,8 @@ def init_db():
         ("extra_days", "REAL DEFAULT 0"),
         ("extra_amount", "REAL DEFAULT 0"),
         ("per_day_rate", "REAL DEFAULT 0"),
+        ("present_days", "REAL DEFAULT 0"),
+        ("source", "TEXT DEFAULT 'manual'"),
     ]:
         _ensure_column(cur, "payroll_records", col, decl)
     conn.commit()
@@ -417,7 +467,7 @@ def init_db():
         norm = _normalize_employee_code(row["employee_code"])
         if norm != row["employee_code"]:
             cur.execute("UPDATE employees SET employee_code = ? WHERE id = ?", (norm, row["id"]))
-    for table in ("leave_balances", "leave_requests", "lop_extra_records", "payroll_records"):
+    for table in ("leave_balances", "leave_requests", "lop_extra_records", "payroll_records", "attendance_records"):
         cur.execute(f"SELECT id, employee_code FROM {table}")
         for row in cur.fetchall():
             norm = _normalize_employee_code(row["employee_code"])
@@ -579,7 +629,7 @@ def delete_user_login(username: str):
 
 
 # ---------------------------------------------------------------------------
-# CTC CALCULATION
+# CTC CALCULATION  (unchanged - still the single source of truth for CTC)
 # ---------------------------------------------------------------------------
 
 def calculate_ctc(basic, da, hra, phonebill, others, esic_if_applicable, pf_basis="capped", is_pwd=False):
@@ -795,6 +845,7 @@ def upsert_leave_balance(employee_code: str, leave_type: str, balance: float):
 def bulk_upsert_leave_balances(rows):
     """rows: iterable of dicts with employee_code, leave_type, leave_balance."""
     ok, failed = 0, 0
+    touched_codes = set()
     for r in rows:
         code = _normalize_employee_code(r.get("employee_code", ""))
         ltype = str(r.get("leave_type", "")).strip().upper()
@@ -808,8 +859,19 @@ def bulk_upsert_leave_balances(rows):
             continue
         if upsert_leave_balance(code, ltype, bal):
             ok += 1
+            touched_codes.add(code)
         else:
             failed += 1
+    # Notify every employee whose balance changed so they see it immediately
+    # in their notification bell (fixes "can't see updated balance").
+    for code in touched_codes:
+        emp = get_employee(code)
+        name = emp.get("employee_name", code) if emp else code
+        create_notification(
+            code, "Leave Balance Updated",
+            f"HR has updated your leave balance. Please check the Leave tab for your latest CL/SL/PL balance.",
+            "leave_balance", None,
+        )
     return ok, failed
 
 
@@ -908,6 +970,15 @@ def get_leave_requests(employee_code=None, boss_employee_code=None, status=None)
     return [dict(r) for r in rows]
 
 
+def get_leave_request_counts(employee_code=None, boss_employee_code=None):
+    """Quick Pending/Approved/Rejected counters for dashboards."""
+    reqs = get_leave_requests(employee_code=employee_code, boss_employee_code=boss_employee_code)
+    counts = {"Pending": 0, "Approved": 0, "Rejected": 0}
+    for r in reqs:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return counts
+
+
 def decide_leave(request_id: int, status: str, decided_by: str = None):
     conn = get_connection()
     row = conn.execute("SELECT * FROM leave_requests WHERE id = ?", (request_id,)).fetchone()
@@ -932,12 +1003,22 @@ def decide_leave(request_id: int, status: str, decided_by: str = None):
            f"{req['days']:g} day(s)) was {status.lower()} by {decider_label}.")
     create_notification(req["employee_code"], f"Leave {status}", msg, "leave_request", request_id)
 
-    emp_name = get_employee(req["employee_code"])
-    emp_name = emp_name.get("employee_name", req["employee_code"]) if emp_name else req["employee_code"]
+    emp_row = get_employee(req["employee_code"])
+    emp_name = emp_row.get("employee_name", req["employee_code"]) if emp_row else req["employee_code"]
     admin_msg = (f"{emp_name} ({req['employee_code']})'s {ltype_label} request "
                  f"({req['from_date']} to {req['to_date']}) was {status.upper()} by "
                  f"{decided_by or 'HR/Admin'}.")
     create_notification("ADMIN", f"Leave {status}", admin_msg, "leave_request", request_id)
+
+    # Also notify the reporting boss, so they stay in the loop even when
+    # HR/Admin is the one who actually decided the request.
+    boss_code = req.get("boss_employee_code")
+    if boss_code and _normalize_employee_code(boss_code) != _normalize_employee_code(decided_by or ""):
+        boss_msg = (f"{emp_name} ({req['employee_code']})'s {ltype_label} request "
+                    f"({req['from_date']} to {req['to_date']}) was {status.upper()} by "
+                    f"{decided_by or 'HR/Admin'}.")
+        create_notification(boss_code, f"Team Leave {status}", boss_msg, "leave_request", request_id)
+
     return True
 
 
@@ -1062,7 +1143,9 @@ def get_announcements(limit=10):
 
 
 # ---------------------------------------------------------------------------
-# LOSS OF PAY (LOP) & EXTRA DAY RECORDS
+# LOSS OF PAY (LOP) & EXTRA DAY RECORDS  (legacy manual-entry path, kept
+# for backward compatibility; the Attendance engine below is now the
+# preferred way to drive payroll for a month whenever data exists there)
 # ---------------------------------------------------------------------------
 
 def add_lop_extra_record(employee_code, record_type, record_date, day_count, reason="", created_by=None):
@@ -1146,7 +1229,8 @@ def get_lop_extra_records(employee_code=None, month=None, year=None, record_type
 
 
 def get_lop_extra_summary(employee_code: str, month: int, year: int):
-    """Returns total LOP days and total Extra days for one employee/month/year."""
+    """Returns total LOP days and total Extra days for one employee/month/year
+    from the legacy manual-entry table."""
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
     lop_row = conn.execute(
@@ -1161,6 +1245,164 @@ def get_lop_extra_summary(employee_code: str, month: int, year: int):
     ).fetchone()
     conn.close()
     return {"lop_days": lop_row["total"] or 0.0, "extra_days": extra_row["total"] or 0.0}
+
+
+# ---------------------------------------------------------------------------
+# MONTHLY ATTENDANCE ENGINE  (new primary payroll driver)
+# ---------------------------------------------------------------------------
+
+def upsert_attendance_day(employee_code, month, year, day, status, created_by=None):
+    code = _normalize_employee_code(employee_code)
+    status = (status or "").strip().upper()
+    if not code or status not in ATTENDANCE_STATUS_CODES:
+        return False
+    try:
+        day = int(day)
+        month = int(month)
+        year = int(year)
+    except (TypeError, ValueError):
+        return False
+    if not (1 <= day <= 31):
+        return False
+
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO attendance_records (employee_code, month, year, day, status, created_by)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(employee_code, month, year, day) DO UPDATE SET
+               status = excluded.status, created_by = excluded.created_by,
+               created_at = CURRENT_TIMESTAMP""",
+        (code, month, year, day, status, created_by),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def bulk_upsert_attendance(rows, month, year, created_by=None, day_columns=None):
+    """rows: iterable of dicts. Each dict must contain 'employee_code' and
+    one key per day of the month (as given in day_columns, e.g. '1'..'31'),
+    with a status code (P/A/HD/WO/H/PL/EX) as the value. Blank/NaN cells
+    are skipped (treated as 'not recorded' rather than an error).
+    Returns (employees_processed, day_cells_applied, failed_cells)."""
+    if day_columns is None:
+        day_columns = [str(d) for d in range(1, 32)]
+    employees_processed = 0
+    applied = 0
+    failed = 0
+    for r in rows:
+        code = _normalize_employee_code(r.get("employee_code", ""))
+        if not code:
+            continue
+        emp = get_employee(code)
+        if not emp:
+            failed += len(day_columns)
+            continue
+        any_cell = False
+        for dcol in day_columns:
+            raw = r.get(dcol)
+            if raw is None:
+                continue
+            status = str(raw).strip().upper()
+            if not status or status in ("NAN", "NONE"):
+                continue
+            try:
+                day_num = int(float(dcol))
+            except ValueError:
+                continue
+            if status not in ATTENDANCE_STATUS_CODES:
+                failed += 1
+                continue
+            if upsert_attendance_day(code, month, year, day_num, status, created_by):
+                applied += 1
+                any_cell = True
+            else:
+                failed += 1
+        if any_cell:
+            employees_processed += 1
+    return employees_processed, applied, failed
+
+
+def get_attendance_records(employee_code=None, month=None, year=None):
+    conn = get_connection()
+    query = "SELECT * FROM attendance_records WHERE 1=1"
+    params = []
+    if employee_code:
+        query += " AND lower(trim(employee_code)) = lower(?)"
+        params.append(_normalize_employee_code(employee_code))
+    if month:
+        query += " AND month = ?"
+        params.append(month)
+    if year:
+        query += " AND year = ?"
+        params.append(year)
+    query += " ORDER BY employee_code, day"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def has_attendance_for_month(employee_code, month, year):
+    code = _normalize_employee_code(employee_code)
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT COUNT(*) as c FROM attendance_records WHERE lower(trim(employee_code))=lower(?) AND month=? AND year=?",
+        (code, month, year),
+    ).fetchone()
+    conn.close()
+    return (row["c"] or 0) > 0
+
+
+def get_attendance_summary(employee_code, month, year):
+    """Present/Absent/HalfDay/Extra/LOP-day totals for one employee/month."""
+    recs = get_attendance_records(employee_code, month, year)
+    present = sum(1 for r in recs if r["status"] in PRESENT_CODES)
+    absent = sum(1 for r in recs if r["status"] in LOP_FULL_CODES)
+    half = sum(1 for r in recs if r["status"] in LOP_HALF_CODES)
+    extra = sum(1 for r in recs if r["status"] in EXTRA_CODES)
+    week_off = sum(1 for r in recs if r["status"] == "WO")
+    holiday = sum(1 for r in recs if r["status"] == "H")
+    on_leave = sum(1 for r in recs if r["status"] == "PL")
+    lop_days = absent + 0.5 * half
+    return {
+        "present_days": present,
+        "absent_days": absent,
+        "half_days": half,
+        "extra_days": extra,
+        "week_off_days": week_off,
+        "holiday_days": holiday,
+        "on_leave_days": on_leave,
+        "lop_days": lop_days,
+        "days_recorded": len(recs),
+    }
+
+
+def get_attendance_matrix(month, year):
+    """Wide-format matrix (one row per employee, one column per day) for
+    display/export in the Admin portal."""
+    recs = get_attendance_records(month=month, year=year)
+    by_emp = {}
+    for r in recs:
+        by_emp.setdefault(r["employee_code"], {})[r["day"]] = r["status"]
+    out = []
+    for code, days in by_emp.items():
+        emp = get_employee(code)
+        row = {
+            "employee_code": code,
+            "employee_name": emp.get("employee_name", "") if emp else "",
+        }
+        for d in range(1, 32):
+            row[str(d)] = days.get(d, "")
+        out.append(row)
+    out.sort(key=lambda r: r["employee_code"])
+    return out
+
+
+def delete_attendance_month(month, year):
+    conn = get_connection()
+    conn.execute("DELETE FROM attendance_records WHERE month = ? AND year = ?", (month, year))
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1191,16 +1433,34 @@ def _snapshot_from_employee(emp: dict):
     }
 
 
-def generate_payroll(employee_code: str, month: int, year: int, generated_by: str = None):
+def generate_payroll(employee_code: str, month: int, year: int, generated_by: str = None, notify: bool = False):
+    """Snapshot the employee's current salary structure for a month.
+
+    Gross = Basic + DA + HRA + Phone + Others  (exactly as requested).
+    Loss-of-Pay / Extra-day amounts are calculated on Gross ÷ STANDARD_WORKING_DAYS.
+    Attendance data (if uploaded for this month) is the preferred source for
+    LOP/Extra days; if none was uploaded, the legacy manual LOP/Extra entries
+    are used instead so nothing already recorded is lost.
+    """
     code = _normalize_employee_code(employee_code)
     emp = get_employee(code)
     if not emp:
         return False
     snap = _snapshot_from_employee(emp)
 
-    lop_extra = get_lop_extra_summary(code, month, year)
-    lop_days = lop_extra["lop_days"]
-    extra_days = lop_extra["extra_days"]
+    if has_attendance_for_month(code, month, year):
+        att = get_attendance_summary(code, month, year)
+        lop_days = att["lop_days"]
+        extra_days = att["extra_days"]
+        present_days = att["present_days"]
+        source = "attendance"
+    else:
+        legacy = get_lop_extra_summary(code, month, year)
+        lop_days = legacy["lop_days"]
+        extra_days = legacy["extra_days"]
+        present_days = 0
+        source = "manual"
+
     per_day_rate = round(snap["gross"] / STANDARD_WORKING_DAYS, 2) if STANDARD_WORKING_DAYS else 0.0
     lop_amount = round(per_day_rate * lop_days, 2)
     extra_amount = round(per_day_rate * extra_days, 2)
@@ -1210,6 +1470,8 @@ def generate_payroll(employee_code: str, month: int, year: int, generated_by: st
     snap["extra_days"] = extra_days
     snap["extra_amount"] = extra_amount
     snap["per_day_rate"] = per_day_rate
+    snap["present_days"] = present_days
+    snap["source"] = source
     snap["net_pay"] = round(snap["net_pay"] - lop_amount + extra_amount, 2)
 
     conn = get_connection()
@@ -1217,9 +1479,9 @@ def generate_payroll(employee_code: str, month: int, year: int, generated_by: st
         """INSERT INTO payroll_records
            (employee_code, month, year, basic_pay, da, hra, phonebill_pay, others, gross,
             employee_pf, employee_esic, employer_pf_total, employer_esic, ctc, net_pay,
-            lop_days, lop_amount, extra_days, extra_amount, per_day_rate,
+            lop_days, lop_amount, extra_days, extra_amount, per_day_rate, present_days, source,
             generated_by, generated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
            ON CONFLICT(employee_code, month, year) DO UPDATE SET
                 basic_pay=excluded.basic_pay, da=excluded.da, hra=excluded.hra,
                 phonebill_pay=excluded.phonebill_pay, others=excluded.others, gross=excluded.gross,
@@ -1228,26 +1490,37 @@ def generate_payroll(employee_code: str, month: int, year: int, generated_by: st
                 ctc=excluded.ctc, net_pay=excluded.net_pay,
                 lop_days=excluded.lop_days, lop_amount=excluded.lop_amount,
                 extra_days=excluded.extra_days, extra_amount=excluded.extra_amount,
-                per_day_rate=excluded.per_day_rate,
+                per_day_rate=excluded.per_day_rate, present_days=excluded.present_days,
+                source=excluded.source,
                 generated_by=excluded.generated_by, generated_at=CURRENT_TIMESTAMP""",
         (code, month, year, snap["basic_pay"], snap["da"], snap["hra"], snap["phonebill_pay"],
          snap["others"], snap["gross"], snap["employee_pf"], snap["employee_esic"],
          snap["employer_pf_total"], snap["employer_esic"], snap["ctc"], snap["net_pay"],
-         snap["lop_days"], snap["lop_amount"], snap["extra_days"], snap["extra_amount"], snap["per_day_rate"],
+         snap["lop_days"], snap["lop_amount"], snap["extra_days"], snap["extra_amount"],
+         snap["per_day_rate"], snap["present_days"], snap["source"],
          generated_by),
     )
     conn.commit()
     conn.close()
+
+    if notify:
+        month_label = MONTH_NAMES[month - 1]
+        create_notification(
+            code, "Payslip Ready",
+            f"Your payslip for {month_label} {year} has been generated and is now available to download "
+            f"from the Payslips tab. Net Pay: ₹{snap['net_pay']:,.0f}.",
+            "payslip", None,
+        )
     return True
 
 
-def generate_payroll_for_all(month: int, year: int, generated_by: str = None, active_only=True):
+def generate_payroll_for_all(month: int, year: int, generated_by: str = None, active_only=True, notify: bool = True):
     emps = get_all_employees()
     count = 0
     for e in emps:
         if active_only and e.get("status") != "Active":
             continue
-        if generate_payroll(e["employee_code"], month, year, generated_by):
+        if generate_payroll(e["employee_code"], month, year, generated_by, notify=notify):
             count += 1
     return count
 

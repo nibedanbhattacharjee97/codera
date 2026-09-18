@@ -15,6 +15,7 @@ from database import (
     change_password, get_announcements, LEAVE_TYPES, LEAVE_TYPE_LABELS,
     get_leave_balance_map, get_employees_reporting_to, decide_leave,
     get_payroll_months_for_employee, get_payroll_record, MONTH_NAMES,
+    get_leave_request_counts,
 )
 from utils import (
     inject_css, render_sidebar_brand, require_login, logout_button,
@@ -39,6 +40,15 @@ emp = get_employee(emp_code)
 if not emp:
     st.error(f"Employee profile record not found for code: {emp_code}. Please contact HR.")
     st.stop()
+
+# Always use the canonical employee_code that the database itself returned
+# (trimmed + upper-cased). This protects against any older cached session
+# token that might still be carrying a stray-cased/whitespace code, which
+# is exactly the kind of mismatch that used to make leave balances /
+# payslips look "missing" on the Employee side even though HR had saved
+# them correctly.
+emp_code = emp["employee_code"]
+st.session_state["employee_code"] = emp_code
 
 is_permanent = emp.get("employee_type") == "Permanent"
 team_members = get_employees_reporting_to(emp_code)
@@ -107,6 +117,7 @@ with tab_map["🧾 My Profile"]:
             st.write(f"**Date of Joining:** {emp.get('date_of_joining') or '—'}")
             st.write(f"**Qualification:** {emp.get('highest_qualification') or '—'}")
             st.write(f"**Employee Type:** {emp.get('employee_type') or '—'}")
+            st.write(f"**Blood Group:** {emp.get('blood_group') or '—'}")
         with coly:
             st.write(f"**Reporting Boss:** {emp.get('reporting_boss') or '—'}")
             st.write(f"**Mobile:** {emp.get('mobile_number') or '—'}")
@@ -114,6 +125,7 @@ with tab_map["🧾 My Profile"]:
             st.write(f"**Place:** {emp.get('place') or '—'}")
         st.write(f"**Emergency Contact:** {emp.get('emergency_contact_number') or '—'}")
         st.write(f"**UAN:** {emp.get('uan_number') or '—'} &nbsp;·&nbsp; **ESIC No.:** {emp.get('esic_number') or '—'}")
+        st.write(f"**Bank Name:** {emp.get('bank_name') or '—'} &nbsp;·&nbsp; **IFSC Code:** {emp.get('ifsc_code') or '—'}")
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ===========================================================================
@@ -150,16 +162,10 @@ with tab_map["💰 Salary Structure"]:
     st.caption(f"PF Contribution Basis: **{pf_basis_display}** &nbsp;·&nbsp; ESIC Wage Ceiling Applied: **{esic_ceiling_display}**")
 
     st.markdown("---")
-    note = " (includes statutory ESIC employer contribution)" if esic_applicable else ""
-    st.markdown(
-        f"""
-        <div class="hr-metric">
-            <div class="label">Total Monthly CTC{note}</div>
-            <div class="value">₹ {emp.get('ctc', 0):,.2f}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    # NOTE: the boxed "Total Monthly CTC" hr-metric panel has been removed
+    # per request. The figure is still shown, plainly, right here — and on
+    # the top KPI row above — so nothing is hidden, just not boxed.
+    st.write(f"**Total Monthly CTC:** ₹ {emp.get('ctc', 0):,.2f}")
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ===========================================================================
@@ -206,6 +212,13 @@ with tab_map["🗓️ Leave"]:
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.subheader("My Leave History")
+    my_counts = get_leave_request_counts(employee_code=emp_code)
+    mc1, mc2, mc3 = st.columns(3)
+    with mc1: metric_card("Pending", my_counts.get("Pending", 0))
+    with mc2: metric_card("Approved", my_counts.get("Approved", 0))
+    with mc3: metric_card("Rejected", my_counts.get("Rejected", 0))
+    st.write("")
+
     my_reqs = get_leave_requests(emp_code)
     if not my_reqs:
         st.info("No leave requests submitted.")
@@ -232,6 +245,12 @@ if is_manager:
         st.caption("You are the reporting boss for the employee(s) below.")
         team_codes = {m["employee_code"]: m["employee_name"] for m in team_members}
         st.markdown(", ".join(f"**{n}** ({c})" for c, n in team_codes.items()))
+
+        team_counts = get_leave_request_counts(boss_employee_code=emp_code)
+        tc1, tc2, tc3 = st.columns(3)
+        with tc1: metric_card("Team Pending", team_counts.get("Pending", 0))
+        with tc2: metric_card("Team Approved", team_counts.get("Approved", 0))
+        with tc3: metric_card("Team Rejected", team_counts.get("Rejected", 0))
         st.markdown("---")
 
         team_reqs = get_leave_requests(boss_employee_code=emp_code)
@@ -252,6 +271,8 @@ if is_manager:
                     if r.get("reason"):
                         st.caption(f"Reason: {r['reason']}")
                     st.caption(f"Applied on: {r['applied_on']}")
+                    if r["status"] != "Pending":
+                        st.caption(f"Decided by: {r.get('decided_by') or '—'} on {r.get('decided_at') or '—'}")
                 with cB:
                     st.markdown(status_pill(r["status"]), unsafe_allow_html=True)
                     if r["status"] == "Pending":

@@ -102,6 +102,7 @@ def generate_payslip_pdf(employee: dict, payroll: dict, company_name="TEC TANIVA
         ["Designation", employee.get("designation") or "-", "Employee Type", employee.get("employee_type") or "-"],
         ["Date of Joining", employee.get("date_of_joining") or "-", "Reporting Boss", employee.get("reporting_boss") or "-"],
         ["UAN Number", employee.get("uan_number") or "-", "ESIC Number", employee.get("esic_number") or "-"],
+        ["Bank Name", employee.get("bank_name") or "-", "IFSC Code", employee.get("ifsc_code") or "-"],
     ]
     t = Table(emp_info, colWidths=[35 * mm, 55 * mm, 35 * mm, 45 * mm])
     t.setStyle(TableStyle([
@@ -171,12 +172,16 @@ def generate_payslip_pdf(employee: dict, payroll: dict, company_name="TEC TANIVA
     lop_amount = payroll.get("lop_amount", 0) or 0
     extra_amount = payroll.get("extra_amount", 0) or 0
     per_day_rate = payroll.get("per_day_rate", 0) or 0
+    present_days = payroll.get("present_days", 0) or 0
+    source = payroll.get("source", "manual")
 
-    if lop_days or extra_days:
+    if lop_days or extra_days or present_days:
         story.append(section_header("Attendance Adjustments (Loss of Pay / Extra Days)"))
         att_rows = [
             ["Per-Day Rate (Gross ÷ 26)", f"₹ {per_day_rate:,.2f}"],
         ]
+        if source == "attendance" and present_days:
+            att_rows.append([f"Days Present (from monthly attendance)", f"{present_days:g} day(s)"])
         if lop_days:
             att_rows.append([f"Loss of Pay ({lop_days:g} day(s))", f"- ₹ {lop_amount:,.2f}"])
         if extra_days:
