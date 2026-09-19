@@ -37,7 +37,8 @@ from database import (
 from utils import (
     inject_css, render_sidebar_brand, require_login, logout_button,
     metric_card, status_pill, render_notification_bell, initials, get_palette,
-    full_logout, render_portal_sidebar,
+    full_logout, render_portal_sidebar, load_lottie_file, render_lottie,
+    render_lottie_loader,
 )
 from payslip import generate_payslip_pdf
 
@@ -48,8 +49,8 @@ require_login(role="admin")
 
 # Warm up database cache on startup for instant lightning performance
 if not st.session_state.get("_admin_cache_warmed"):
-    with st.spinner("⚡ Caching database for ultra-fast performance..."):
-        preload_admin_cache()
+    render_lottie_loader("Caching database for ultra-fast performance...")
+    preload_admin_cache()
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)

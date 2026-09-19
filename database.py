@@ -20,11 +20,14 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 def _get_database_url() -> str:
     # Priority 1: Streamlit Secrets
-    if hasattr(st, "secrets"):
-        if "postgres" in st.secrets and "url" in st.secrets["postgres"]:
-            return st.secrets["postgres"]["url"]
-        if "DATABASE_URL" in st.secrets:
-            return st.secrets["DATABASE_URL"]
+    try:
+        if hasattr(st, "secrets"):
+            if "postgres" in st.secrets and "url" in st.secrets["postgres"]:
+                return st.secrets["postgres"]["url"]
+            if "DATABASE_URL" in st.secrets:
+                return st.secrets["DATABASE_URL"]
+    except Exception:
+        pass
     # Priority 2: OS Environment Variable
     return os.environ.get("DATABASE_URL", "")
 
