@@ -1,7 +1,7 @@
 """
 database.py
 PostgreSQL backend for TEC TANIVA HRMS.
-Handles SSL connections, Neon cold-starts, connection pooling, and CRUD.
+Handles SSL connections, Neon cold-starts, connection pooling, ultra-fast caching, and CRUD.
 """
 
 import os
@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 import psycopg2
 from psycopg2 import pool
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values
 import streamlit as st
 
 # ---------------------------------------------------------------------------
@@ -38,8 +38,7 @@ def get_connection_pool():
     dsn = DB_URL
     # Ensure Neon doesn't drop cold-starts during serverless wakeups, and
     # keep the TCP link alive so we don't pay a fresh SSL handshake / Neon
-    # cold-start on every single Streamlit rerun (this was the single
-    # biggest cause of "every click feels slow").
+    # cold-start on every single Streamlit rerun.
     extra_params = {
         "connect_timeout": "15",
         "keepalives": "1",
@@ -51,7 +50,6 @@ def get_connection_pool():
         if k not in dsn:
             dsn += ("&" if "?" in dsn else "?") + f"{k}={v}"
 
-    # Retry up to 3 times to allow Neon compute to wake from 'Idle' state
     last_err = None
     for attempt in range(3):
         try:
@@ -67,7 +65,30 @@ def get_connection_pool():
 
 def get_connection():
     cp = get_connection_pool()
-    conn = cp.getconn()
+    for _ in range(3):
+        conn = None
+        try:
+            conn = cp.getconn()
+            # Verify connection is still alive (Neon cold-start/idle recovery)
+            if conn.closed != 0:
+                try:
+                    cp.putconn(conn, close=True)
+                except Exception:
+                    pass
+                conn = cp.getconn()
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1;")
+            conn.autocommit = False
+            return conn
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            if conn:
+                try:
+                    cp.putconn(conn, close=True)
+                except Exception:
+                    pass
+            time.sleep(0.5)
+    # Direct fallback if pool exhausted
+    conn = psycopg2.connect(DB_URL)
     conn.autocommit = False
     return conn
 
@@ -75,6 +96,19 @@ def release_connection(conn):
     try:
         cp = get_connection_pool()
         cp.putconn(conn)
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+# ---------------------------------------------------------------------------
+# CACHE INVALIDATION & PRELOAD HELPERS
+# ---------------------------------------------------------------------------
+def clear_db_cache():
+    """Clears Streamlit cache on data modifications so queries immediately return fresh data."""
+    try:
+        st.cache_data.clear()
     except Exception:
         pass
 
@@ -392,6 +426,7 @@ def authenticate_user(username: str, password: str):
             if legacy:
                 cur.execute("UPDATE users SET password_hash = %s WHERE id = %s;", (hash_password(password), row["id"]))
                 conn.commit()
+                clear_db_cache()
             return dict(row)
     finally:
         release_connection(conn)
@@ -407,6 +442,7 @@ def create_user(username, password, role, employee_code=None, full_name=None):
                 (uname, hash_password(password), role, code, full_name)
             )
             conn.commit()
+            clear_db_cache()
             return True
     except psycopg2.IntegrityError:
         conn.rollback()
@@ -432,9 +468,11 @@ def change_password(username: str, new_password: str):
                 (hash_password(new_password), _normalize_username(username))
             )
             conn.commit()
+            clear_db_cache()
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_user_by_employee_code(employee_code: str, role: str = "employee"):
     conn = get_connection()
     code = _normalize_employee_code(employee_code)
@@ -480,6 +518,7 @@ def reset_employee_password(employee_code: str, new_password: str):
                     (username, hash_password(new_password), code, emp["employee_name"])
                 )
             conn.commit()
+            clear_db_cache()
             return username
     except Exception:
         conn.rollback()
@@ -487,6 +526,7 @@ def reset_employee_password(employee_code: str, new_password: str):
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_database_info():
     conn = get_connection()
     try:
@@ -512,6 +552,7 @@ def delete_user_login(username: str):
         with conn.cursor() as cur:
             cur.execute("DELETE FROM users WHERE username = %s;", (_normalize_username(username),))
             conn.commit()
+            clear_db_cache()
     finally:
         release_connection(conn)
 
@@ -570,7 +611,7 @@ def calculate_ctc(basic, da, hra, phonebill, others, esic_if_applicable, pf_basi
     return breakdown["total_ctc"], breakdown
 
 # ---------------------------------------------------------------------------
-# EMPLOYEE CRUD
+# EMPLOYEE CRUD (Cached Reads + Instant Cache Invalidation on Writes)
 # ---------------------------------------------------------------------------
 def add_employee(data: dict):
     conn = get_connection()
@@ -583,6 +624,7 @@ def add_employee(data: dict):
         with conn.cursor() as cur:
             cur.execute(f"INSERT INTO employees ({col_names}) VALUES ({placeholders});", list(data.values()))
             conn.commit()
+            clear_db_cache()
             return True
     except Exception:
         conn.rollback()
@@ -599,6 +641,7 @@ def update_employee(employee_code: str, data: dict):
         with conn.cursor() as cur:
             cur.execute(f"UPDATE employees SET {set_clause} WHERE LOWER(TRIM(employee_code)) = LOWER(%s);", list(data.values()) + [code])
             conn.commit()
+            clear_db_cache()
             return True
     except Exception:
         conn.rollback()
@@ -615,9 +658,11 @@ def delete_employee(employee_code: str):
             cur.execute("DELETE FROM users WHERE LOWER(TRIM(employee_code)) = LOWER(%s);", (code,))
             cur.execute("DELETE FROM leave_balances WHERE LOWER(TRIM(employee_code)) = LOWER(%s);", (code,))
             conn.commit()
+            clear_db_cache()
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_all_employees():
     conn = get_connection()
     try:
@@ -627,6 +672,7 @@ def get_all_employees():
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_employee(employee_code: str):
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
@@ -638,6 +684,7 @@ def get_employee(employee_code: str):
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=180, show_spinner=False)
 def employee_count():
     conn = get_connection()
     try:
@@ -648,23 +695,19 @@ def employee_count():
         release_connection(conn)
 
 def next_employee_code():
-    conn = get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT employee_code FROM employees;")
-            rows = cur.fetchall()
-            nums = []
-            for (code,) in rows:
-                if code and "-" in code:
-                    try:
-                        nums.append(int(code.split("-")[-1]))
-                    except ValueError:
-                        pass
-            next_id = max(nums) + 1 if nums else 1
-            return f"TT-EMP-{next_id:04d}"
-    finally:
-        release_connection(conn)
+    emps = get_all_employees()
+    nums = []
+    for e in emps:
+        code = e.get("employee_code", "")
+        if code and "-" in code:
+            try:
+                nums.append(int(code.split("-")[-1]))
+            except ValueError:
+                pass
+    next_id = max(nums) + 1 if nums else 1
+    return f"TT-EMP-{next_id:04d}"
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_all_employee_names():
     conn = get_connection()
     try:
@@ -674,6 +717,7 @@ def get_all_employee_names():
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_employees_reporting_to(boss_code: str):
     if not boss_code:
         return []
@@ -688,6 +732,7 @@ def get_employees_reporting_to(boss_code: str):
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_statutory_summary():
     conn = get_connection()
     try:
@@ -728,6 +773,7 @@ def upsert_leave_balance(employee_code: str, leave_type: str, balance: float):
                 DO UPDATE SET balance = EXCLUDED.balance, updated_at = CURRENT_TIMESTAMP;
             """, (code, ltype, float(balance)))
             conn.commit()
+            clear_db_cache()
             return True
     except Exception:
         conn.rollback()
@@ -736,7 +782,8 @@ def upsert_leave_balance(employee_code: str, leave_type: str, balance: float):
         release_connection(conn)
 
 def bulk_upsert_leave_balances(rows):
-    ok, failed = 0, 0
+    valid_rows = []
+    failed = 0
     touched_codes = set()
     for r in rows:
         code = _normalize_employee_code(r.get("employee_code", ""))
@@ -749,11 +796,29 @@ def bulk_upsert_leave_balances(rows):
         if not code or ltype not in LEAVE_TYPES:
             failed += 1
             continue
-        if upsert_leave_balance(code, ltype, bal):
-            ok += 1
-            touched_codes.add(code)
-        else:
-            failed += 1
+        valid_rows.append((code, ltype, bal))
+        touched_codes.add(code)
+
+    if not valid_rows:
+        return 0, failed
+
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            insert_query = """
+                INSERT INTO leave_balances (employee_code, leave_type, balance, updated_at)
+                VALUES %s
+                ON CONFLICT (employee_code, leave_type)
+                DO UPDATE SET balance = EXCLUDED.balance, updated_at = CURRENT_TIMESTAMP;
+            """
+            execute_values(cur, insert_query, valid_rows)
+            conn.commit()
+            clear_db_cache()
+    except Exception:
+        conn.rollback()
+        return 0, failed + len(valid_rows)
+    finally:
+        release_connection(conn)
 
     for code in touched_codes:
         create_notification(
@@ -761,8 +826,9 @@ def bulk_upsert_leave_balances(rows):
             "HR has updated your leave balance. Please check the Leave tab for your latest CL/SL/PL balance.",
             "leave_balance", None,
         )
-    return ok, failed
+    return len(valid_rows), failed
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_leave_balances(employee_code: str):
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
@@ -783,6 +849,7 @@ def get_leave_balances(employee_code: str):
 def get_leave_balance_map(employee_code: str):
     return {b["leave_type"]: b["balance"] for b in get_leave_balances(employee_code)}
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_all_leave_balances():
     conn = get_connection()
     try:
@@ -826,6 +893,7 @@ def apply_leave(employee_code, leave_type, from_date, to_date, days, reason):
             """, (code, ltype, str(from_date), str(to_date), days, reason, boss_code))
             request_id = cur.fetchone()[0]
             conn.commit()
+            clear_db_cache()
     finally:
         release_connection(conn)
 
@@ -839,6 +907,7 @@ def apply_leave(employee_code, leave_type, from_date, to_date, days, reason):
         return True, "Leave request submitted successfully and sent to your reporting boss for approval."
     return True, "Leave request submitted successfully. No reporting boss is assigned to you, so this has been sent directly to HR/Admin."
 
+@st.cache_data(ttl=120, show_spinner=False)
 def get_leave_requests(employee_code=None, boss_employee_code=None, status=None):
     conn = get_connection()
     query = "SELECT * FROM leave_requests WHERE 1=1"
@@ -860,6 +929,7 @@ def get_leave_requests(employee_code=None, boss_employee_code=None, status=None)
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=120, show_spinner=False)
 def get_leave_request_counts(employee_code=None, boss_employee_code=None):
     reqs = get_leave_requests(employee_code=employee_code, boss_employee_code=boss_employee_code)
     counts = {"Pending": 0, "Approved": 0, "Rejected": 0}
@@ -882,6 +952,7 @@ def decide_leave(request_id: int, status: str, decided_by: str = None):
                 (status, decided_by, request_id)
             )
             conn.commit()
+            clear_db_cache()
     finally:
         release_connection(conn)
 
@@ -919,9 +990,11 @@ def create_notification(recipient_code, title, message, related_type=None, relat
                 VALUES (%s, %s, %s, %s, %s);
             """, (recipient, title, message, related_type, related_id))
             conn.commit()
+            clear_db_cache()
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_notifications(recipient_code, unread_only=False, limit=30):
     conn = get_connection()
     recipient = (recipient_code or "").strip()
@@ -939,6 +1012,7 @@ def get_notifications(recipient_code, unread_only=False, limit=30):
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_notifications_with_unread_count(recipient_code, limit=20):
     conn = get_connection()
     recipient = (recipient_code or "").strip()
@@ -955,16 +1029,12 @@ def get_notifications_with_unread_count(recipient_code, limit=20):
                 (recipient,)
             )
             row = cur.fetchone()
-            if not row:
-                unread = 0
-            elif isinstance(row, dict):
-                unread = row.get("unread_count", 0)
-            else:
-                unread = row[0]
+            unread = row["unread_count"] if row else 0
             return notifs, int(unread or 0)
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=120, show_spinner=False)
 def get_notification_log(recipient_code="ADMIN", related_type=None, limit=500):
     conn = get_connection()
     recipient = (recipient_code or "").strip()
@@ -982,6 +1052,7 @@ def get_notification_log(recipient_code="ADMIN", related_type=None, limit=500):
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=60, show_spinner=False)
 def unread_notification_count(recipient_code):
     conn = get_connection()
     recipient = (recipient_code or "").strip()
@@ -999,6 +1070,7 @@ def mark_notification_read(notification_id: int):
         with conn.cursor() as cur:
             cur.execute("UPDATE notifications SET is_read = 1 WHERE id = %s;", (notification_id,))
             conn.commit()
+            clear_db_cache()
     finally:
         release_connection(conn)
 
@@ -1010,6 +1082,7 @@ def mark_all_notifications_read(recipient_code):
         with conn.cursor() as cur:
             cur.execute("UPDATE notifications SET is_read = 1 WHERE recipient_code = %s;", (recipient,))
             conn.commit()
+            clear_db_cache()
     finally:
         release_connection(conn)
 
@@ -1019,9 +1092,11 @@ def add_announcement(title, message):
         with conn.cursor() as cur:
             cur.execute("INSERT INTO announcements (title, message) VALUES (%s, %s);", (title, message))
             conn.commit()
+            clear_db_cache()
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_announcements(limit=10):
     conn = get_connection()
     try:
@@ -1057,6 +1132,7 @@ def add_lop_extra_record(employee_code, record_type, record_date, day_count, rea
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
             """, (code, rtype, rdate, days, reason, m, y, created_by))
             conn.commit()
+            clear_db_cache()
             return True
     finally:
         release_connection(conn)
@@ -1087,9 +1163,11 @@ def delete_lop_extra_record(record_id: int):
         with conn.cursor() as cur:
             cur.execute("DELETE FROM lop_extra_records WHERE id = %s;", (record_id,))
             conn.commit()
+            clear_db_cache()
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_lop_extra_records(employee_code=None, month=None, year=None, record_type=None):
     conn = get_connection()
     query = "SELECT * FROM lop_extra_records WHERE 1=1"
@@ -1114,6 +1192,7 @@ def get_lop_extra_records(employee_code=None, month=None, year=None, record_type
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_lop_extra_summary(employee_code: str, month: int, year: int):
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
@@ -1135,7 +1214,7 @@ def get_lop_extra_summary(employee_code: str, month: int, year: int):
         release_connection(conn)
 
 # ---------------------------------------------------------------------------
-# ATTENDANCE ENGINE
+# ATTENDANCE ENGINE (Ultra-Fast Batch Writes & Grouped Reads)
 # ---------------------------------------------------------------------------
 def upsert_attendance_day(employee_code, month, year, day, status, created_by=None):
     code = _normalize_employee_code(employee_code)
@@ -1161,6 +1240,7 @@ def upsert_attendance_day(employee_code, month, year, day, status, created_by=No
                     created_at = CURRENT_TIMESTAMP;
             """, (code, month, year, day, status, created_by))
             conn.commit()
+            clear_db_cache()
             return True
     except Exception:
         conn.rollback()
@@ -1169,12 +1249,17 @@ def upsert_attendance_day(employee_code, month, year, day, status, created_by=No
         release_connection(conn)
 
 def bulk_upsert_attendance(rows, month, year, created_by=None, day_columns=None):
+    """Blazing fast batch upsert using a single SQL query instead of thousands of roundtrips."""
     if day_columns is None:
         day_columns = [str(d) for d in range(1, 32)]
+
+    all_emp_codes = {e["employee_code"].upper() for e in get_all_employees()}
     employees_processed, applied, failed = 0, 0, 0
+    records_to_insert = []
+
     for r in rows:
         code = _normalize_employee_code(r.get("employee_code", ""))
-        if not code or not get_employee(code):
+        if not code or code not in all_emp_codes:
             failed += len(day_columns)
             continue
         any_cell = False
@@ -1187,20 +1272,44 @@ def bulk_upsert_attendance(rows, month, year, created_by=None, day_columns=None)
                 continue
             try:
                 day_num = int(float(dcol))
+                if not (1 <= day_num <= 31):
+                    failed += 1
+                    continue
             except ValueError:
                 continue
             if status not in ATTENDANCE_STATUS_CODES:
                 failed += 1
                 continue
-            if upsert_attendance_day(code, month, year, day_num, status, created_by):
-                applied += 1
-                any_cell = True
-            else:
-                failed += 1
+            records_to_insert.append((code, month, year, day_num, status, created_by))
+            any_cell = True
         if any_cell:
             employees_processed += 1
+
+    if records_to_insert:
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                insert_query = """
+                    INSERT INTO attendance_records (employee_code, month, year, day, status, created_by)
+                    VALUES %s
+                    ON CONFLICT(employee_code, month, year, day) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        created_by = EXCLUDED.created_by,
+                        created_at = CURRENT_TIMESTAMP;
+                """
+                execute_values(cur, insert_query, records_to_insert, page_size=500)
+                conn.commit()
+                applied = len(records_to_insert)
+        except Exception:
+            conn.rollback()
+            return 0, 0, len(records_to_insert)
+        finally:
+            release_connection(conn)
+            clear_db_cache()
+
     return employees_processed, applied, failed
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_attendance_records(employee_code=None, month=None, year=None):
     conn = get_connection()
     query = "SELECT * FROM attendance_records WHERE 1=1"
@@ -1222,6 +1331,7 @@ def get_attendance_records(employee_code=None, month=None, year=None):
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=180, show_spinner=False)
 def has_attendance_for_month(employee_code, month, year):
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
@@ -1232,6 +1342,7 @@ def has_attendance_for_month(employee_code, month, year):
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_attendance_summary(employee_code, month, year):
     recs = get_attendance_records(employee_code, month, year)
     present = sum(1 for r in recs if r["status"] in PRESENT_CODES)
@@ -1254,17 +1365,56 @@ def get_attendance_summary(employee_code, month, year):
         "days_recorded": len(recs),
     }
 
+@st.cache_data(ttl=180, show_spinner=False)
+def get_all_attendance_summaries(month, year):
+    """Summarizes attendance for all employees in a given month in 1 memory pass with 0 N+1 queries."""
+    recs = get_attendance_records(month=month, year=year)
+    all_emps = {e["employee_code"]: e.get("employee_name", "") for e in get_all_employees()}
+
+    by_emp = {}
+    for r in recs:
+        by_emp.setdefault(r["employee_code"], []).append(r)
+
+    out = []
+    for code, emp_recs in by_emp.items():
+        present = sum(1 for r in emp_recs if r["status"] in PRESENT_CODES)
+        absent = sum(1 for r in emp_recs if r["status"] in LOP_FULL_CODES)
+        half = sum(1 for r in emp_recs if r["status"] in LOP_HALF_CODES)
+        extra = sum(1 for r in emp_recs if r["status"] in EXTRA_CODES)
+        week_off = sum(1 for r in emp_recs if r["status"] == "WO")
+        holiday = sum(1 for r in emp_recs if r["status"] == "H")
+        on_leave = sum(1 for r in emp_recs if r["status"] == "PL")
+        lop_days = absent + 0.5 * half
+        out.append({
+            "employee_code": code,
+            "employee_name": all_emps.get(code, code),
+            "present_days": present,
+            "absent_days": absent,
+            "half_days": half,
+            "extra_days": extra,
+            "week_off_days": week_off,
+            "holiday_days": holiday,
+            "on_leave_days": on_leave,
+            "lop_days": lop_days,
+            "days_recorded": len(emp_recs),
+        })
+    out.sort(key=lambda r: r["employee_code"])
+    return out
+
+@st.cache_data(ttl=180, show_spinner=False)
 def get_attendance_matrix(month, year):
     recs = get_attendance_records(month=month, year=year)
     by_emp = {}
     for r in recs:
         by_emp.setdefault(r["employee_code"], {})[r["day"]] = r["status"]
+
+    # Use in-memory lookup instead of querying DB in a loop
+    all_emps = {e["employee_code"]: e.get("employee_name", "") for e in get_all_employees()}
     out = []
     for code, days in by_emp.items():
-        emp = get_employee(code)
         row = {
             "employee_code": code,
-            "employee_name": emp.get("employee_name", "") if emp else "",
+            "employee_name": all_emps.get(code, ""),
         }
         for d in range(1, 32):
             row[str(d)] = days.get(d, "")
@@ -1278,6 +1428,7 @@ def delete_attendance_month(month, year):
         with conn.cursor() as cur:
             cur.execute("DELETE FROM attendance_records WHERE month = %s AND year = %s;", (month, year))
             conn.commit()
+            clear_db_cache()
     finally:
         release_connection(conn)
 
@@ -1307,7 +1458,7 @@ def _snapshot_from_employee(emp: dict):
         "net_pay": net_pay,
     }
 
-def generate_payroll(employee_code: str, month: int, year: int, generated_by: str = None, notify: bool = False):
+def generate_payroll(employee_code: str, month: int, year: int, generated_by: str = None, notify: bool = False, invalidate_cache: bool = True):
     code = _normalize_employee_code(employee_code)
     emp = get_employee(code)
     if not emp:
@@ -1367,6 +1518,8 @@ def generate_payroll(employee_code: str, month: int, year: int, generated_by: st
                   snap["lop_days"], snap["lop_amount"], snap["extra_days"], snap["extra_amount"],
                   snap["per_day_rate"], snap["present_days"], snap["source"], generated_by))
             conn.commit()
+            if invalidate_cache:
+                clear_db_cache()
     finally:
         release_connection(conn)
 
@@ -1385,10 +1538,12 @@ def generate_payroll_for_all(month: int, year: int, generated_by: str = None, ac
     for e in emps:
         if active_only and e.get("status") != "Active":
             continue
-        if generate_payroll(e["employee_code"], month, year, generated_by, notify=notify):
+        if generate_payroll(e["employee_code"], month, year, generated_by, notify=notify, invalidate_cache=False):
             count += 1
+    clear_db_cache()
     return count
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_payroll_record(employee_code: str, month: int, year: int):
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
@@ -1400,6 +1555,7 @@ def get_payroll_record(employee_code: str, month: int, year: int):
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_payroll_months_for_employee(employee_code: str):
     code = _normalize_employee_code(employee_code)
     conn = get_connection()
@@ -1410,6 +1566,7 @@ def get_payroll_months_for_employee(employee_code: str):
     finally:
         release_connection(conn)
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_all_payroll_records(month=None, year=None, employee_code=None):
     conn = get_connection()
     query = "SELECT * FROM payroll_records WHERE 1=1"
@@ -1430,3 +1587,37 @@ def get_all_payroll_records(month=None, year=None, employee_code=None):
             return [dict(r) for r in cur.fetchall()]
     finally:
         release_connection(conn)
+
+# ---------------------------------------------------------------------------
+# INITIAL PRELOAD WARMUP (Fulfills the user request for preloading)
+# ---------------------------------------------------------------------------
+def preload_admin_cache():
+    """Warms the database cache on initial load for instant responses across all tabs."""
+    try:
+        get_all_employees()
+        get_database_info()
+        get_leave_requests()
+        get_leave_request_counts()
+        get_all_leave_balances()
+        get_announcements(10)
+        get_notifications_with_unread_count("ADMIN")
+        st.session_state["_admin_cache_warmed"] = True
+    except Exception:
+        pass
+
+def preload_employee_cache(employee_code: str):
+    """Warms the database cache for employee portal on initial load."""
+    try:
+        code = _normalize_employee_code(employee_code)
+        get_employee(code)
+        get_employees_reporting_to(code)
+        get_leave_balances(code)
+        get_leave_balance_map(code)
+        get_leave_requests(employee_code=code)
+        get_leave_request_counts(employee_code=code)
+        get_payroll_months_for_employee(code)
+        get_announcements(10)
+        get_notifications_with_unread_count(code)
+        st.session_state[f"_emp_cache_warmed_{code}"] = True
+    except Exception:
+        pass
