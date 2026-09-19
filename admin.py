@@ -565,7 +565,6 @@ with tab_payroll:
     st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("##### 📦 Download All Payslips for a Month (ZIP)")
-    st.markdown('<div class="hr-card">', unsafe_allow_html=True)
     zip_month = MONTH_NAMES.index(run_month) + 1
     zip_records = get_all_payroll_records(month=zip_month, year=int(run_year))
     if not zip_records:
