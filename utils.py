@@ -194,7 +194,7 @@ def inject_css():
             color: {P['text']};
         }}
 
-        .stApp {{
+        .stApp, [data-testid="stAppViewContainer"] {{
             background-color: {P['bg']};
         }}
 
@@ -385,15 +385,13 @@ def render_sidebar_brand():
     with st.sidebar:
         if logo_b64:
             st.markdown(
-                f"""
-                <div style="display:flex; align-items:center; gap:10px; margin-bottom:0.6rem;">
-                    <img src="data:image/png;base64,{logo_b64}" style="height:38px; border-radius:6px; background:white; padding:2px;" />
-                    <div>
-                        <div style="font-weight:800; font-size:0.95rem; line-height:1.2; color:#ffffff !important;">TEC TANIVA</div>
-                        <div style="font-size:0.65rem; color:#94a3b8 !important;">HRMS Portal</div>
-                    </div>
-                </div>
-                """,
+                f'<div style="display:flex; align-items:center; gap:10px; margin-bottom:0.6rem;">'
+                f'<img src="data:image/png;base64,{logo_b64}" style="height:38px; border-radius:6px; background:white; padding:2px;" />'
+                f'<div>'
+                f'<div style="font-weight:800; font-size:0.95rem; line-height:1.2; color:#ffffff !important;">TEC TANIVA</div>'
+                f'<div style="font-size:0.65rem; color:#94a3b8 !important;">HRMS Portal</div>'
+                f'</div>'
+                f'</div>',
                 unsafe_allow_html=True
             )
         else:
@@ -524,25 +522,114 @@ def require_login(role="admin"):
         st.markdown(
             f"""
             <style>
-            .stApp {{
-                background-image: linear-gradient(rgba(11, 28, 44, 0.35), rgba(11, 28, 44, 0.35)), url("data:image/png;base64,{bg_b64}");
-                background-size: cover; background-position: center; background-repeat: no-repeat; background-attachment: fixed;
+            [data-testid="stAppViewContainer"] {{
+                background-image: linear-gradient(rgba(11, 28, 44, 0.15), rgba(11, 28, 44, 0.25)), url("data:image/png;base64,{bg_b64}") !important;
+                background-size: cover !important;
+                background-position: center center !important;
+                background-repeat: no-repeat !important;
+                background-attachment: fixed !important;
+                background-color: #f1f5f9 !important;
+            }}
+            .stApp, [data-testid="stHeader"], [data-testid="stToolbar"], .main, .block-container {{
+                background: transparent !important;
+                background-color: transparent !important;
+            }}
+            [data-testid="stHeader"] {{
+                display: none !important;
+            }}
+            .block-container {{
+                padding-top: 2rem !important;
+                padding-bottom: 2rem !important;
+                max-width: 1250px !important;
             }}
             [data-testid="stForm"] {{
-                background: rgba(255, 255, 255, 0.24) !important;
-                backdrop-filter: blur(18px) !important;
-                -webkit-backdrop-filter: blur(18px) !important;
-                border-radius: 20px !important;
-                padding: 2rem 2.2rem !important;
-                box-shadow: 0 15px 35px rgba(0, 0, 0, 0.25) !important;
-                border: 1px solid rgba(255, 255, 255, 0.35) !important;
-                max-width: 420px !important;
+                background: rgba(255, 255, 255, 0.92) !important;
+                backdrop-filter: blur(20px) !important;
+                -webkit-backdrop-filter: blur(20px) !important;
+                border-radius: 24px !important;
+                padding: 2.2rem 2.2rem 1.8rem 2.2rem !important;
+                box-shadow: 0 25px 50px -12px rgba(11, 28, 44, 0.25), 0 0 0 1px rgba(255, 255, 255, 0.9) inset !important;
+                border: 1px solid rgba(226, 232, 240, 0.85) !important;
+                max-width: 440px !important;
                 margin: 0 auto !important;
+                transition: all 0.3s ease !important;
             }}
-            [data-testid="stForm"] label div p {{
+            [data-testid="stForm"] label div p, [data-testid="stForm"] label p {{
                 color: #0f172a !important;
-                font-weight: 600 !important;
-                font-size: 0.85rem !important;
+                font-weight: 700 !important;
+                font-size: 0.88rem !important;
+                letter-spacing: 0.2px !important;
+                margin-bottom: 3px !important;
+            }}
+            [data-testid="stForm"] div[data-baseweb="input"] {{
+                background-color: #ffffff !important;
+                border: 1.5px solid #cbd5e1 !important;
+                border-radius: 12px !important;
+                transition: all 0.2s ease !important;
+                overflow: hidden !important;
+            }}
+            [data-testid="stForm"] div[data-baseweb="input"]:focus-within {{
+                border-color: #17b6a7 !important;
+                box-shadow: 0 0 0 3.5px rgba(23, 182, 167, 0.22) !important;
+            }}
+            [data-testid="stForm"] div[data-baseweb="input"] input {{
+                background-color: transparent !important;
+                color: #0f172a !important;
+                border: none !important;
+                box-shadow: none !important;
+                padding: 0.68rem 0.85rem !important;
+                font-size: 0.95rem !important;
+                font-weight: 500 !important;
+            }}
+            [data-testid="stForm"] input:-webkit-autofill,
+            [data-testid="stForm"] input:-webkit-autofill:hover, 
+            [data-testid="stForm"] input:-webkit-autofill:focus {{
+                -webkit-box-shadow: 0 0 0px 1000px #ffffff inset !important;
+                -webkit-text-fill-color: #0f172a !important;
+                transition: background-color 5000s ease-in-out 0s;
+            }}
+            [data-testid="stForm"] div[data-baseweb="input"] button {{
+                background-color: transparent !important;
+                border: none !important;
+                color: #64748b !important;
+            }}
+            [data-testid="stForm"] div[data-baseweb="input"] button:hover {{
+                color: #17b6a7 !important;
+            }}
+            [data-testid="stForm"] button[kind="primary"],
+            [data-testid="stForm"] .stFormSubmitButton > button {{
+                background: linear-gradient(135deg, #17b6a7 0%, #0b1c2c 125%) !important;
+                color: #ffffff !important;
+                font-weight: 700 !important;
+                font-size: 1rem !important;
+                border-radius: 12px !important;
+                padding: 0.72rem 1.5rem !important;
+                border: none !important;
+                box-shadow: 0 4px 14px rgba(23, 182, 167, 0.35) !important;
+                transition: all 0.2s ease-in-out !important;
+                letter-spacing: 0.3px !important;
+                width: 100% !important;
+                margin-top: 0.5rem !important;
+            }}
+            [data-testid="stForm"] button[kind="primary"]:hover,
+            [data-testid="stForm"] .stFormSubmitButton > button:hover {{
+                background: linear-gradient(135deg, #139a8c 0%, #06111b 125%) !important;
+                box-shadow: 0 6px 20px rgba(23, 182, 167, 0.5) !important;
+                transform: translateY(-1px) !important;
+            }}
+            [data-testid="stForm"] button[kind="primary"]:active,
+            [data-testid="stForm"] .stFormSubmitButton > button:active {{
+                transform: translateY(1px) !important;
+            }}
+            @media (max-width: 768px) {{
+                [data-testid="stAppViewContainer"] {{
+                    background-position: 70% center !important;
+                }}
+                [data-testid="stForm"] {{
+                    max-width: 100% !important;
+                    margin: 0.5rem auto !important;
+                    padding: 1.6rem 1.3rem !important;
+                }}
             }}
             </style>
             """, unsafe_allow_html=True)
@@ -550,45 +637,72 @@ def require_login(role="admin"):
         st.markdown(
             """
             <style>
-            .stApp { background: linear-gradient(135deg, #0b1c2c 0%, #17b6a7 140%); }
+            [data-testid="stAppViewContainer"] {
+                background: radial-gradient(circle at 85% 15%, rgba(23, 182, 167, 0.25) 0%, transparent 45%), linear-gradient(135deg, #0b1c2c 0%, #102a43 50%, #0f766e 100%) !important;
+            }
+            .stApp, [data-testid="stHeader"], [data-testid="stToolbar"], .main, .block-container {
+                background: transparent !important;
+                background-color: transparent !important;
+            }
+            [data-testid="stHeader"] { display: none !important; }
             [data-testid="stForm"] {
                 background: rgba(255, 255, 255, 0.95) !important;
-                border-radius: 20px !important;
-                padding: 2rem 2.2rem !important;
-                box-shadow: 0 15px 35px rgba(0, 0, 0, 0.25) !important;
-                max-width: 420px !important;
+                border-radius: 24px !important;
+                padding: 2.2rem 2.2rem !important;
+                box-shadow: 0 20px 45px rgba(0, 0, 0, 0.25) !important;
+                max-width: 440px !important;
                 margin: 0 auto !important;
             }
             </style>
             """, unsafe_allow_html=True)
 
-    st.markdown("<div style='height: 8vh;'></div>", unsafe_allow_html=True)
-    # Weighted so the card sits in the right half of the screen, clear of the
-    # logo/tagline that the background image carries on its left-hand side.
-    left_spacer, col, right_spacer = st.columns([1.6, 1.15, 0.35], gap="large")
+    st.markdown("<div style='height: 5vh;'></div>", unsafe_allow_html=True)
+    # Weighted so the card sits on the right side of the screen on desktop,
+    # keeping the logo & tagline clearly visible on the left side of the background.
+    left_spacer, col, right_spacer = st.columns([1.5, 1.25, 0.25], gap="large")
 
     with col:
-        portal_title = "Admin / HR Portal" if role == "admin" else "Employee Self-Service Portal"
+        role_badge = "🛡️ ADMIN / HR PORTAL" if role == "admin" else "👤 EMPLOYEE SELF-SERVICE"
+        role_badge_bg = "rgba(11, 28, 44, 0.08)" if role == "admin" else "rgba(23, 182, 167, 0.12)"
+        role_badge_color = "#0b1c2c" if role == "admin" else "#0d9488"
+        role_desc = (
+            "Sign in to manage employees, payroll, attendance & approvals."
+            if role == "admin" else
+            "Sign in to view your payslips, apply for leaves & access profile."
+        )
+
         with st.form(f"login_form_{role}", clear_on_submit=False):
             logo_b64 = logo_base64()
-            logo_html = (f'<img src="data:image/png;base64,{logo_b64}" style="height:44px;border-radius:8px;margin-bottom:8px;" />'
-                         if logo_b64 else "🏢")
+            logo_html = (
+                f'<img src="data:image/png;base64,{logo_b64}" style="height:48px; max-width:100%; object-fit:contain; margin-bottom:10px;" />'
+                if logo_b64 else '<div style="font-size:2.2rem; margin-bottom:6px;">🏢</div>'
+            )
+
             st.markdown(
-                f"""
-                <div style="text-align: center; margin-bottom: 1.2rem;">
-                    {logo_html}
-                    <h3 style="color: #0f172a; font-weight: 800; margin: 0.3rem 0 0.1rem 0;">TEC TANIVA HRMS</h3>
-                    <p style="color: #475569; font-size: 0.85rem; font-weight: 600; margin:0;">{portal_title}</p>
-                </div>
-                """,
+                f'<div style="text-align: center; margin-bottom: 1.3rem;">'
+                f'{logo_html}'
+                f'<div><span style="display:inline-flex; align-items:center; gap:6px; padding:4px 12px; background:{role_badge_bg}; color:{role_badge_color}; border-radius:20px; font-size:0.72rem; font-weight:700; letter-spacing:0.5px; margin-bottom:0.5rem; border:1px solid rgba(15,23,42,0.08);">{role_badge}</span></div>'
+                f'<h3 style="color:#0f172a; font-weight:800; font-size:1.45rem; margin:0 0 0.3rem 0; letter-spacing:-0.4px;">Welcome Back</h3>'
+                f'<p style="color:#64748b; font-size:0.84rem; font-weight:500; margin:0; line-height:1.4;">{role_desc}</p>'
+                f'</div>',
                 unsafe_allow_html=True
             )
 
-            username = st.text_input("Username", placeholder="e.g. TT-EMP-0001", autocomplete="username")
-            password = st.text_input("Password", type="password", placeholder="Enter password", autocomplete="current-password")
+            user_label = "Username or Admin ID" if role == "admin" else "Employee Code / Username"
+            user_placeholder = "e.g. admin" if role == "admin" else "e.g. TT-EMP-0001"
+            username = st.text_input(user_label, placeholder=user_placeholder, autocomplete="username")
+            password = st.text_input("Password", type="password", placeholder="Enter your password", autocomplete="current-password")
 
-            st.markdown("<div style='height: 5px;'></div>", unsafe_allow_html=True)
-            submitted = st.form_submit_button("Sign In", use_container_width=True, type="primary")
+            st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
+            submit_label = "Sign In to Admin Portal →" if role == "admin" else "Sign In to Employee Portal →"
+            submitted = st.form_submit_button(submit_label, use_container_width=True, type="primary")
+
+            st.markdown(
+                '<div style="text-align:center; margin-top:1.1rem; font-size:0.72rem; color:#64748b; display:flex; align-items:center; justify-content:center; gap:6px;">'
+                '<span>🔒</span><span>256-Bit SSL Encrypted • Enterprise Access</span>'
+                '</div>',
+                unsafe_allow_html=True
+            )
 
             if submitted:
                 user = authenticate_user(username, password)
