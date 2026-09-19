@@ -548,7 +548,7 @@ with tab_payroll:
                "the Monthly Attendance tab if uploaded for that month. Employees can only download "
                "payslips for months you have generated, and are notified automatically when ready.")
 
-    st.markdown('<div class="hr-card">', unsafe_allow_html=True)
+
     pr1, pr2, pr3 = st.columns([1, 1, 1])
     with pr1:
         run_month = st.selectbox("Month", MONTH_NAMES, index=date.today().month - 1, key="run_month")
