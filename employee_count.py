@@ -20,7 +20,7 @@ from database import (
 from utils import (
     inject_css, render_sidebar_brand, require_login, logout_button,
     metric_card, status_pill, render_notification_bell, initials, full_logout,
-    render_portal_sidebar, load_lottie_file, render_lottie, render_lottie_loader,
+    render_portal_sidebar,
 )
 from payslip import generate_payslip_pdf
 
@@ -47,8 +47,8 @@ st.session_state["employee_code"] = emp_code
 
 # Warm up database cache on initial load for instant lightning navigation
 if not st.session_state.get(f"_emp_cache_warmed_{emp_code}"):
-    render_lottie_loader("Loading your portal data...")
-    preload_employee_cache(emp_code)
+    with st.spinner("⚡ Loading your portal data..."):
+        preload_employee_cache(emp_code)
 
 is_permanent = emp.get("employee_type") == "Permanent"
 team_members = get_employees_reporting_to(emp_code)
