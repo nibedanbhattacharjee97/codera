@@ -8,12 +8,14 @@ import streamlit as st
 import streamlit.components.v1 as components
 import base64
 import os
+import json
 import hmac
 import hashlib
 from datetime import datetime
 from database import authenticate_user, get_notifications_with_unread_count, mark_notification_read, mark_all_notifications_read
 
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+LOTTIE_DIR = os.path.join(ASSETS_DIR, "lottie")
 
 SESSION_SECRET = os.environ.get("HRMS_SESSION_SECRET", "TEC_TANIVA_HRMS_PERSISTENT_KEY_2026")
 
@@ -132,6 +134,88 @@ def logo_base64():
     return get_base64_image(os.path.join(ASSETS_DIR, "logo.png"))
 
 
+@st.cache_data(show_spinner=False)
+def load_lottie_file(filename_or_path: str):
+    """Safely loads and caches a Lottie JSON animation from assets/lottie/ or an absolute path."""
+    try:
+        target = filename_or_path
+        if not os.path.isabs(target):
+            target = os.path.join(LOTTIE_DIR, filename_or_path)
+        if not target.endswith(".json"):
+            target += ".json"
+        if os.path.exists(target):
+            with open(target, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+
+def render_lottie(lottie_data, height=180, width=None, key=None, loop=True, speed=1.0):
+    """Renders a Lottie animation seamlessly. Uses streamlit-lottie if available,
+    with an automatic zero-crash pure HTML5/SVG fallback if not installed."""
+    if not lottie_data:
+        return
+    try:
+        from streamlit_lottie import st_lottie
+        st_lottie(lottie_data, height=height, width=width, key=key, loop=loop, speed=speed)
+        return
+    except Exception:
+        pass
+
+    # Robust HTML5/bodymovin player fallback
+    try:
+        json_str = json.dumps(lottie_data)
+        h_px = f"{height}px" if isinstance(height, int) else str(height)
+        w_style = f"width: {width}px;" if width else "width: 100%;"
+        player_id = f"lottie_{abs(hash(str(key) if key else json_str[:40])) % 1000000}"
+        html = f"""
+        <div id="{player_id}" style="display:flex; justify-content:center; align-items:center; height:{h_px}; {w_style} margin:0 auto;"></div>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js"></script>
+        <script>
+        (function() {{
+            try {{
+                var container = document.getElementById('{player_id}');
+                if (container && window.bodymovin) {{
+                    window.bodymovin.loadAnimation({{
+                        container: container,
+                        renderer: 'svg',
+                        loop: {'true' if loop else 'false'},
+                        autoplay: true,
+                        animationData: {json_str}
+                    }});
+                }}
+            }} catch(e) {{}}
+        }})();
+        </script>
+        """
+        components.html(html, height=height or 180)
+    except Exception:
+        pass
+
+
+def render_lottie_loader(text="Loading portal data...", height=110):
+    """Renders a smooth, branded Lottie loader with a status caption to eliminate blank white stalls."""
+    lottie_data = load_lottie_file("loading.json")
+    if lottie_data:
+        c1, c2, c3 = st.columns([1.2, 1.6, 1.2])
+        with c2:
+            render_lottie(lottie_data, height=height, key=f"loader_anim_{abs(hash(text)) % 10000}")
+            st.markdown(
+                f"""
+                <div style="text-align:center; margin-top:-6px; margin-bottom:12px;">
+                    <span style="font-weight:700; color:#17b6a7; font-size:0.92rem; letter-spacing:0.3px;">
+                        ⚡ {text}
+                    </span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info(f"⚡ {text}")
+
+
+
 # ---------------------------------------------------------------------------
 # THEME
 # ---------------------------------------------------------------------------
@@ -189,13 +273,26 @@ def inject_css():
         <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
-        html, body, [class*="css"] {{
+        /* Anti-white-flash baseline styling */
+        html, body, #root, .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {{
             font-family: 'Plus Jakarta Sans', sans-serif;
             color: {P['text']};
+            background-color: {P['bg']} !important;
         }}
 
-        .stApp {{
-            background-color: {P['bg']};
+        /* Prevent sudden white screen or harsh dimming during reruns */
+        [data-test-script-state="running"] [data-testid="stAppViewContainer"] {{
+            opacity: 0.94 !important;
+            transition: opacity 0.15s ease-in-out;
+        }}
+
+        /* Smooth subtle fade-in of main content */
+        .main .block-container {{
+            animation: hrmsFadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+        }}
+        @keyframes hrmsFadeIn {{
+            from {{ opacity: 0.9; transform: translateY(1px); }}
+            to {{ opacity: 1; transform: translateY(0); }}
         }}
 
         #MainMenu, header, footer {{ visibility: hidden; }}
@@ -570,14 +667,17 @@ def require_login(role="admin"):
     with col:
         portal_title = "Admin / HR Portal" if role == "admin" else "Employee Self-Service Portal"
         with st.form(f"login_form_{role}", clear_on_submit=False):
+            login_anim = load_lottie_file("login.json")
+            if login_anim:
+                render_lottie(login_anim, height=95, key=f"login_lottie_{role}")
             logo_b64 = logo_base64()
             logo_html = (f'<img src="data:image/png;base64,{logo_b64}" style="height:44px;border-radius:8px;margin-bottom:8px;" />'
-                         if logo_b64 else "🏢")
+                         if logo_b64 else ("" if login_anim else "🏢"))
             st.markdown(
                 f"""
                 <div style="text-align: center; margin-bottom: 1.2rem;">
                     {logo_html}
-                    <h3 style="color: #0f172a; font-weight: 800; margin: 0.3rem 0 0.1rem 0;">TEC TANIVA HRMS</h3>
+                    <h3 style="color: #0f172a; font-weight: 800; margin: 0.2rem 0 0.1rem 0;">TEC TANIVA HRMS</h3>
                     <p style="color: #475569; font-size: 0.85rem; font-weight: 600; margin:0;">{portal_title}</p>
                 </div>
                 """,
