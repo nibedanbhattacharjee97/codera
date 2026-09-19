@@ -15,7 +15,7 @@ from database import (
     change_password, get_announcements, LEAVE_TYPES, LEAVE_TYPE_LABELS,
     get_leave_balance_map, get_employees_reporting_to, decide_leave,
     get_payroll_months_for_employee, get_payroll_record, MONTH_NAMES,
-    get_leave_request_counts,
+    get_leave_request_counts, clear_db_cache, preload_employee_cache,
 )
 from utils import (
     inject_css, render_sidebar_brand, require_login, logout_button,
@@ -42,13 +42,13 @@ if not emp:
     st.stop()
 
 # Always use the canonical employee_code that the database itself returned
-# (trimmed + upper-cased). This protects against any older cached session
-# token that might still be carrying a stray-cased/whitespace code, which
-# is exactly the kind of mismatch that used to make leave balances /
-# payslips look "missing" on the Employee side even though HR had saved
-# them correctly.
 emp_code = emp["employee_code"]
 st.session_state["employee_code"] = emp_code
+
+# Warm up database cache on initial load for instant lightning navigation
+if not st.session_state.get(f"_emp_cache_warmed_{emp_code}"):
+    with st.spinner("⚡ Loading your portal data..."):
+        preload_employee_cache(emp_code)
 
 is_permanent = emp.get("employee_type") == "Permanent"
 team_members = get_employees_reporting_to(emp_code)
@@ -73,8 +73,15 @@ with col_title:
     st.caption("Your self-service portal — profile, leave balances, payslips, and company updates.")
 with col_logout:
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-    if st.button("🚪 Sign Out", type="primary", use_container_width=True, key="top_signout_emp"):
-        full_logout()
+    c_ref, c_out = st.columns([1, 1])
+    with c_ref:
+        if st.button("🔄 Sync", help="Refresh portal data", use_container_width=True):
+            clear_db_cache()
+            preload_employee_cache(emp_code)
+            st.rerun()
+    with c_out:
+        if st.button("🚪 Sign Out", type="primary", use_container_width=True, key="top_signout_emp"):
+            full_logout()
 
 bal_map = get_leave_balance_map(emp_code)
 c1, c2, c3, c4 = st.columns(4)
@@ -162,9 +169,6 @@ with tab_map["💰 Salary Structure"]:
     st.caption(f"PF Contribution Basis: **{pf_basis_display}** &nbsp;·&nbsp; ESIC Wage Ceiling Applied: **{esic_ceiling_display}**")
 
     st.markdown("---")
-    # NOTE: the boxed "Total Monthly CTC" hr-metric panel has been removed
-    # per request. The figure is still shown, plainly, right here — and on
-    # the top KPI row above — so nothing is hidden, just not boxed.
     st.write(f"**Total Monthly CTC:** ₹ {emp.get('ctc', 0):,.2f}")
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -238,10 +242,6 @@ with tab_map["🗓️ Leave"]:
 
 # ===========================================================================
 # TEAM APPROVALS (only shown to managers)
-#
-# This is the ONLY place a leave request with a reporting boss gets
-# approved/rejected by default (see admin.py's Leave Approvals tab, which
-# no longer bypasses this for requests that have a boss).
 # ===========================================================================
 if is_manager:
     with tab_map["✅ Team Approvals"]:
