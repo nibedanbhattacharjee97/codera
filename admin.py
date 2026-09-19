@@ -24,14 +24,15 @@ from database import (
     bulk_upsert_leave_balances, generate_payroll, generate_payroll_for_all,
     get_payroll_record, get_all_payroll_records, get_payroll_months_for_employee,
     get_notification_log, mark_all_notifications_read, get_leave_request_counts,
-    create_notification,
+    create_notification, clear_db_cache, preload_admin_cache,
     # ---- Loss of Pay (LOP) / Extra Days  [legacy, still available] ----
     STANDARD_WORKING_DAYS, add_lop_extra_record, bulk_upsert_lop_extra,
     delete_lop_extra_record, get_lop_extra_records, get_lop_extra_summary,
     # ---- Monthly Attendance engine  [NEW] ----
     ATTENDANCE_STATUS_LABELS, ATTENDANCE_STATUS_CODES, bulk_upsert_attendance,
     upsert_attendance_day, get_attendance_records, get_attendance_summary,
-    get_attendance_matrix, has_attendance_for_month, delete_attendance_month,
+    get_attendance_matrix, get_all_attendance_summaries, has_attendance_for_month,
+    delete_attendance_month,
 )
 from utils import (
     inject_css, render_sidebar_brand, require_login, logout_button,
@@ -44,6 +45,11 @@ st.set_page_config(page_title="Admin Dashboard | TEC TANIVA HRMS", page_icon="�
 init_db()
 inject_css()
 require_login(role="admin")
+
+# Warm up database cache on startup for instant lightning performance
+if not st.session_state.get("_admin_cache_warmed"):
+    with st.spinner("⚡ Caching database for ultra-fast performance..."):
+        preload_admin_cache()
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -61,16 +67,24 @@ with col_title:
     dbi = get_database_info()
 with col_logout:
     st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-    if st.button("🚪 Sign Out", type="primary", use_container_width=True, key="top_signout"):
-        full_logout()
+    c_ref, c_out = st.columns([1, 1])
+    with c_ref:
+        if st.button("🔄 Sync", help="Refresh database cache", use_container_width=True):
+            clear_db_cache()
+            preload_admin_cache()
+            st.rerun()
+    with c_out:
+        if st.button("🚪 Sign Out", type="primary", use_container_width=True, key="top_signout"):
+            full_logout()
 
 st.markdown("---")
 
 employees = get_all_employees()
-total_emp = employee_count()
+total_emp = len(employees)
 active_emp = len([e for e in employees if e["status"] == "Active"])
 permanent_emp = len([e for e in employees if e.get("employee_type") == "Permanent"])
-pending_leaves = len([r for r in get_leave_requests() if r["status"] == "Pending"])
+leave_counts = get_leave_request_counts()
+pending_leaves = leave_counts.get("Pending", 0)
 
 # NOTE: the old 5th "Total Monthly CTC" KPI card has been removed per request.
 c1, c2, c3, c4 = st.columns(4)
@@ -188,9 +202,6 @@ def render_employee_form(emp: dict, employees_all: list, form_key: str, submit_l
             key=f"{form_key}_pwd",
         )
 
-        # CTC is still calculated with full statutory accuracy, but the
-        # detailed breakdown panel is no longer displayed per request —
-        # only a single-line total is shown so Admin can still sanity-check it.
         live_ctc, bd = calculate_ctc(basic_pay, da, hra, phonebill_pay, others, esic_if_applicable, pf_basis, is_pwd)
 
         pf = st.number_input(
@@ -299,10 +310,6 @@ def render_employee_form(emp: dict, employees_all: list, form_key: str, submit_l
         return False
 
 
-# A small cross-version shim: st.dialog is the modern API (Streamlit ≥1.37),
-# st.experimental_dialog is the name it had briefly before that. Fall back
-# to an inline expander if neither is available so older Streamlit installs
-# still work (no crash), just without the true popup behaviour.
 _dialog_decorator = getattr(st, "dialog", None) or getattr(st, "experimental_dialog", None)
 
 
@@ -332,8 +339,7 @@ def _open_edit_modal(sel_code):
 
 
 # ===========================================================================
-# TAB: ONBOARD EMPLOYEE  (add mode only now — editing happens via the
-# Directory tab's popup, per request)
+# TAB: ONBOARD EMPLOYEE
 # ===========================================================================
 with tab_add:
     st.markdown('<div class="hr-card">', unsafe_allow_html=True)
@@ -342,8 +348,6 @@ with tab_add:
         st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
-# If a Directory "Edit" click requested the modal, open it here (works
-# regardless of which tab happens to be active on rerun).
 if st.session_state.get("open_edit_modal_for"):
     _open_edit_modal(st.session_state["open_edit_modal_for"])
 
@@ -470,14 +474,7 @@ with tab_balances:
         st.info("No leave balances set yet. Upload a sheet or set them manually above.")
 
 # ===========================================================================
-# TAB: LEAVE APPROVALS
-#
-# CHANGE: Approvals now respect the employee's reporting boss. When a
-# request has a boss assigned, Admin only gets a read-only status here
-# ("Awaiting decision from reporting boss") — the boss decides it from
-# their own Employee Portal → Team Approvals tab. Admin can still act
-# directly on requests with NO boss assigned, and has an "HR Override"
-# expander for the rare case a boss is unavailable.
+# TAB: LEAVE APPROVALS (Optimized with in-memory employee lookup)
 # ===========================================================================
 with tab_leaves:
     st.subheader("Employee Leave Requests")
@@ -485,7 +482,7 @@ with tab_leaves:
                "they'll decide it from their own portal's Team Approvals tab. Admin/HR only decides directly "
                "when no reporting boss is assigned, or via HR Override below if the boss is unavailable.")
 
-    all_counts = get_leave_request_counts()
+    all_counts = leave_counts
     lc1, lc2, lc3 = st.columns(3)
     with lc1: metric_card("Pending (Company-wide)", all_counts.get("Pending", 0))
     with lc2: metric_card("Approved (Company-wide)", all_counts.get("Approved", 0))
@@ -497,8 +494,9 @@ with tab_leaves:
     if not reqs:
         st.info("No leave requests found.")
     else:
+        emp_map = {e["employee_code"]: e for e in employees}
         for r in reqs:
-            emp_r = get_employee(r["employee_code"]) or {}
+            emp_r = emp_map.get(r["employee_code"]) or get_employee(r["employee_code"]) or {}
             st.markdown('<div class="hr-card">', unsafe_allow_html=True)
             cA, cB = st.columns([3, 1])
             with cA:
@@ -507,7 +505,7 @@ with tab_leaves:
                 if r.get("reason"):
                     st.caption(f"Reason: {r['reason']}")
                 boss_code = r.get("boss_employee_code")
-                boss_emp = get_employee(boss_code) if boss_code else None
+                boss_emp = emp_map.get(boss_code) if boss_code else (get_employee(boss_code) if boss_code else None)
                 boss_display = boss_emp["employee_name"] if boss_emp else (boss_code or "— No boss assigned —")
                 st.caption(f"Reporting Boss: {boss_display} · Applied on: {r['applied_on']}")
                 if r["status"] != "Pending":
@@ -516,10 +514,6 @@ with tab_leaves:
                 st.markdown(status_pill(r["status"]), unsafe_allow_html=True)
                 if r["status"] == "Pending":
                     if boss_code:
-                        # Boss-first workflow: Admin does not get direct
-                        # Approve/Reject buttons here for requests that
-                        # have a reporting boss. Only an explicit HR
-                        # Override (below) can bypass that.
                         st.caption(f"⏳ Awaiting decision from **{boss_display}**")
                         with st.expander("HR Override"):
                             st.caption("Use only if the reporting boss is unavailable. This bypasses their approval.")
@@ -533,8 +527,6 @@ with tab_leaves:
                                     decide_leave(r["id"], "Rejected", decided_by=st.session_state.get("username"))
                                     st.rerun()
                     else:
-                        # No reporting boss on file — HR/Admin is the
-                        # rightful direct approver for this one.
                         b1, b2 = st.columns(2)
                         with b1:
                             if st.button("✅", key=f"ap_{r['id']}", help="Approve"):
@@ -582,9 +574,10 @@ with tab_payroll:
         st.caption(f"{len(zip_records)} payslip(s) available for {run_month} {int(run_year)}.")
         if st.button("📦 Build ZIP of All Payslips", use_container_width=True):
             buf = io.BytesIO()
+            emp_lookup = {e["employee_code"]: e for e in employees}
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for rec in zip_records:
-                    e = get_employee(rec["employee_code"])
+                    e = emp_lookup.get(rec["employee_code"]) or get_employee(rec["employee_code"])
                     if not e:
                         continue
                     pdf_bytes = generate_payslip_pdf(e, rec)
@@ -649,8 +642,7 @@ with tab_payroll:
         st.info("No payroll records generated yet.")
 
 # ===========================================================================
-# TAB: MONTHLY ATTENDANCE  [NEW — replaces manual Loss-of-Pay entry as the
-# primary payroll driver]
+# TAB: MONTHLY ATTENDANCE (Ultra-Fast Batch Engine)
 # ===========================================================================
 with tab_attendance:
     st.subheader("Monthly Attendance → Payroll")
@@ -685,9 +677,6 @@ with tab_attendance:
         )
 
         sample_cols = {"employee_code": ["TT-EMP-0001", "TT-EMP-0002"], "employee_name": ["Jane Doe", "John Roe"]}
-        sample_statuses = ["P"] * days_in_month
-        for i, d in enumerate([1, 2] if days_in_month >= 2 else [1]):
-            pass
         for d in range(1, days_in_month + 1):
             col_vals = ["P", "P"]
             if d == 5:
@@ -767,7 +756,7 @@ with tab_attendance:
             st.info("Onboard employees first.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # -------------------- VIEW / EXPORT --------------------
+    # -------------------- VIEW / EXPORT (Zero N+1 Queries) --------------------
     with view_tab:
         st.markdown(f"##### 📋 Attendance Matrix — {att_month_name} {int(att_year)}")
         matrix = get_attendance_matrix(att_month, int(att_year))
@@ -787,17 +776,13 @@ with tab_attendance:
 
             st.markdown("---")
             st.markdown("##### Per-Employee Summary (this month)")
-            summary_rows = []
-            for row in matrix:
-                s = get_attendance_summary(row["employee_code"], att_month, int(att_year))
-                s["employee_code"] = row["employee_code"]
-                s["employee_name"] = row["employee_name"]
-                summary_rows.append(s)
-            summ_df = pd.DataFrame(summary_rows)[
-                ["employee_code", "employee_name", "present_days", "absent_days", "half_days",
-                 "extra_days", "week_off_days", "holiday_days", "on_leave_days", "lop_days"]
-            ]
-            st.dataframe(summ_df, use_container_width=True, hide_index=True)
+            summary_rows = get_all_attendance_summaries(att_month, int(att_year))
+            if summary_rows:
+                summ_df = pd.DataFrame(summary_rows)[
+                    ["employee_code", "employee_name", "present_days", "absent_days", "half_days",
+                     "extra_days", "week_off_days", "holiday_days", "on_leave_days", "lop_days"]
+                ]
+                st.dataframe(summ_df, use_container_width=True, hide_index=True)
 
             st.markdown("---")
             if st.button(f"🗑️ Delete ALL Attendance for {att_month_name} {int(att_year)}", type="secondary"):
