@@ -69,31 +69,53 @@ def get_connection():
         conn = None
         try:
             conn = cp.getconn()
-            # Verify connection is still alive (Neon cold-start/idle recovery)
             if conn.closed != 0:
                 try:
                     cp.putconn(conn, close=True)
                 except Exception:
                     pass
-                conn = cp.getconn()
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1;")
-            conn.autocommit = False
+                continue
+            # Ensure connection is in a clean, idle state
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            if getattr(conn, "autocommit", False):
+                try:
+                    conn.autocommit = False
+                except Exception:
+                    pass
             return conn
-        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+        except (psycopg2.OperationalError, psycopg2.InterfaceError, psycopg2.DatabaseError):
             if conn:
                 try:
                     cp.putconn(conn, close=True)
                 except Exception:
                     pass
             time.sleep(0.5)
+
     # Direct fallback if pool exhausted
     conn = psycopg2.connect(DB_URL)
-    conn.autocommit = False
+    try:
+        conn.rollback()
+    except Exception:
+        pass
+    if getattr(conn, "autocommit", False):
+        try:
+            conn.autocommit = False
+        except Exception:
+            pass
     return conn
 
 def release_connection(conn):
+    if conn is None:
+        return
     try:
+        if conn.closed == 0:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         cp = get_connection_pool()
         cp.putconn(conn)
     except Exception:
@@ -1029,7 +1051,12 @@ def get_notifications_with_unread_count(recipient_code, limit=20):
                 (recipient,)
             )
             row = cur.fetchone()
-            unread = row["unread_count"] if row else 0
+            if not row:
+                unread = 0
+            elif isinstance(row, dict):
+                unread = row.get("unread_count", 0)
+            else:
+                unread = row[0]
             return notifs, int(unread or 0)
     finally:
         release_connection(conn)
